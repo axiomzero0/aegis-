@@ -1,6 +1,7 @@
 // aegis/runtime/sync/atomic.hpp — std::atomic wrappers (Crowded effect).
 #pragma once
 #include <atomic>
+#include <type_traits>
 #include "aegis/runtime/core/basic_types.hpp"
 namespace aegis::runtime::sync {
 
@@ -23,9 +24,12 @@ public:
     void store(T v, Ordering o = Ordering::SeqCst) noexcept {
         value_.store(v, to_std_memory_order(o));
     }
+    // SFINAE-disable fetch_add / fetch_sub for non-integral T (e.g. bool).
+    template <typename U = T, typename = std::enable_if_t<std::is_integral_v<U>>>
     T fetch_add(T v, Ordering o = Ordering::SeqCst) noexcept {
         return value_.fetch_add(v, to_std_memory_order(o));
     }
+    template <typename U = T, typename = std::enable_if_t<std::is_integral_v<U>>>
     T fetch_sub(T v, Ordering o = Ordering::SeqCst) noexcept {
         return value_.fetch_sub(v, to_std_memory_order(o));
     }

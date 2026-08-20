@@ -37,6 +37,7 @@ IR_SRC=(
     "$ROOT/compiler/ir/src/HashConsing.cpp"
     "$ROOT/compiler/ir/src/Verifier.cpp"
     "$ROOT/compiler/ir/src/Printer.cpp"
+    "$ROOT/compiler/ir/src/Types.cpp"
 )
 FRONTEND_SRC=(
     "$ROOT/compiler/frontend/src/Lexer.cpp"
@@ -53,6 +54,15 @@ PASSES_SRC=(
     "$ROOT/compiler/passes/src/mid/EDCE.cpp"
     "$ROOT/compiler/passes/src/mid/SCCP.cpp"
     "$ROOT/compiler/passes/src/mid/SimplifyControl.cpp"
+    "$ROOT/compiler/passes/src/mid/BoundsCheckElim.cpp"
+    "$ROOT/compiler/passes/src/mid/EscapeAnalysis.cpp"
+    "$ROOT/compiler/passes/src/mid/LICM.cpp"
+    "$ROOT/compiler/passes/src/mid/StrengthReduction.cpp"
+    "$ROOT/compiler/passes/src/mid/CSE.cpp"
+    "$ROOT/compiler/passes/src/mid/CopyPropagation.cpp"
+    "$ROOT/compiler/passes/src/mid/DSE.cpp"
+    "$ROOT/compiler/passes/src/mid/TCO.cpp"
+    "$ROOT/compiler/passes/src/mid/SCEV.cpp"
 )
 BACKEND_SRC=(
     "$ROOT/compiler/backend/src/RegAlloc/LinearScan.cpp"
@@ -71,3 +81,4 @@ build_test test_core_containers "${SUPPORT_SRC[@]}"
 build_test test_ir_graph "${SUPPORT_SRC[@]}" "${IR_SRC[@]}"
 build_test test_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}"
 build_test test_frontend_smoke "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${FRONTEND_SRC[@]}"
+build_test test_new_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}"

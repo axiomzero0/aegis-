@@ -18,6 +18,7 @@
 
 #include "aegis/support/Flags.hpp"
 #include "aegis/support/Primitives.hpp"
+#include "aegis/ir/NodeKind.hpp"
 
 namespace aegis::ir {
 

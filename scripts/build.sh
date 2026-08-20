@@ -47,7 +47,6 @@ CXXFLAGS_HOT_PATH=(
 
 mkdir -p "$BUILD/obj"
 
-# Hot-path TUs get the no-exceptions flag; frontend/diagnostic TUs may keep exceptions.
 SUPPORT_HOT=(
     support/src/SmallVector.cpp
     support/src/SparseSet.cpp
@@ -63,6 +62,7 @@ IR_HOT=(
     ir/src/HashConsing.cpp
     ir/src/Verifier.cpp
     ir/src/Printer.cpp
+    ir/src/Types.cpp
 )
 FRONTEND=(
     frontend/src/Lexer.cpp
@@ -79,18 +79,44 @@ PASSES=(
     passes/src/mid/EDCE.cpp
     passes/src/mid/SCCP.cpp
     passes/src/mid/SimplifyControl.cpp
+    passes/src/mid/BoundsCheckElim.cpp
+    passes/src/mid/EscapeAnalysis.cpp
+    passes/src/mid/LICM.cpp
+    passes/src/mid/StrengthReduction.cpp
+    passes/src/mid/CSE.cpp
+    passes/src/mid/CopyPropagation.cpp
+    passes/src/mid/DSE.cpp
+    passes/src/mid/TCO.cpp
+    passes/src/mid/SCEV.cpp
 )
 BACKEND=(
     backend/src/RegAlloc/LinearScan.cpp
     backend/src/x86/InstrSel_x86.cpp
+    backend/src/x86/Target_x86.cpp
+    backend/src/x86/Emitter_x86.cpp
 )
-# Runtime sources are stubbed out for now (they ship with compiled binaries
-# and are not needed to build the compiler itself). Uncomment when the runtime
-# is real.
-# RUNTIME_SRC=(
-#     runtime/core/src/panic.cpp
-#     ...
-# )
+JIT=(
+    jit/src/JitEngine.cpp
+    jit/src/Deopt.cpp
+    jit/src/MemManager.cpp
+)
+PGO=(
+    pgo/src/Profiler.cpp
+    pgo/src/ProfileData.cpp
+)
+RUNTIME_SRC=(
+    runtime/core/src/panic.cpp
+    runtime/alloc/src/bump.cpp
+    runtime/alloc/src/pool.cpp
+    runtime/alloc/src/system.cpp
+    runtime/sync/src/atomic.cpp
+    runtime/sync/src/mutex.cpp
+    runtime/sync/src/rwlock.cpp
+    runtime/sync/src/channel.cpp
+    runtime/io/src/file.cpp
+    runtime/io/src/net.cpp
+    runtime/io/src/syscall.cpp
+)
 
 ALL_SOURCES=()
 ALL_SOURCES+=("${SUPPORT_HOT[@]}")
@@ -99,8 +125,48 @@ ALL_SOURCES+=("${IR_HOT[@]}")
 ALL_SOURCES+=("${FRONTEND[@]}")
 ALL_SOURCES+=("${PASSES[@]}")
 ALL_SOURCES+=("${BACKEND[@]}")
+ALL_SOURCES+=("${JIT[@]}")
+ALL_SOURCES+=("${PGO[@]}")
+ALL_SOURCES+=("${RUNTIME_SRC[@]}")
 
-HOT_SET=("support/src/SmallVector.cpp" "support/src/SparseSet.cpp" "support/src/BitVector.cpp" "support/src/SwissTable.cpp" "support/src/StringIntern.cpp" "ir/src/Graph.cpp" "ir/src/HashConsing.cpp" "ir/src/Verifier.cpp" "ir/src/Printer.cpp" "passes/src/PassManager.cpp" "passes/src/mid/StandardPipeline.cpp" "passes/src/mid/GVN.cpp" "passes/src/mid/EDCE.cpp" "passes/src/mid/SCCP.cpp" "passes/src/mid/SimplifyControl.cpp" "backend/src/RegAlloc/LinearScan.cpp" "backend/src/x86/InstrSel_x86.cpp")
+# Hot-path TUs: support (containers), ir, passes, backend, jit, pgo.
+# Frontend + runtime + diagnostics are allowed exceptions (cold).
+HOT_SET=(
+    "support/src/SmallVector.cpp"
+    "support/src/SparseSet.cpp"
+    "support/src/BitVector.cpp"
+    "support/src/SwissTable.cpp"
+    "support/src/StringIntern.cpp"
+    "ir/src/Graph.cpp"
+    "ir/src/HashConsing.cpp"
+    "ir/src/Verifier.cpp"
+    "ir/src/Printer.cpp"
+    "ir/src/Types.cpp"
+    "passes/src/PassManager.cpp"
+    "passes/src/mid/StandardPipeline.cpp"
+    "passes/src/mid/GVN.cpp"
+    "passes/src/mid/EDCE.cpp"
+    "passes/src/mid/SCCP.cpp"
+    "passes/src/mid/SimplifyControl.cpp"
+    "passes/src/mid/BoundsCheckElim.cpp"
+    "passes/src/mid/EscapeAnalysis.cpp"
+    "passes/src/mid/LICM.cpp"
+    "passes/src/mid/StrengthReduction.cpp"
+    "passes/src/mid/CSE.cpp"
+    "passes/src/mid/CopyPropagation.cpp"
+    "passes/src/mid/DSE.cpp"
+    "passes/src/mid/TCO.cpp"
+    "passes/src/mid/SCEV.cpp"
+    "backend/src/RegAlloc/LinearScan.cpp"
+    "backend/src/x86/InstrSel_x86.cpp"
+    "backend/src/x86/Target_x86.cpp"
+    "backend/src/x86/Emitter_x86.cpp"
+    "jit/src/JitEngine.cpp"
+    "jit/src/Deopt.cpp"
+    "jit/src/MemManager.cpp"
+    "pgo/src/Profiler.cpp"
+    "pgo/src/ProfileData.cpp"
+)
 
 is_hot() {
     local src="$1"
@@ -116,7 +182,6 @@ for src in "${ALL_SOURCES[@]}"; do
     OBJECTS+=("$obj")
     SRC_PATH="$ROOT/compiler/$src"
     if [[ ! -f "$SRC_PATH" ]]; then
-        # Try runtime path
         SRC_PATH="$ROOT/$src"
     fi
     if [[ ! -f "$SRC_PATH" ]]; then
@@ -135,4 +200,16 @@ done
 echo "LINK aegisc"
 "$CXX" "${CXXFLAGS_COMMON[@]}" "${OBJECTS[@]}" "$ROOT/tools/aegisc/main.cpp" -o "$BUILD/aegisc"
 
+echo "LINK aegis-lsp"
+"$CXX" "${CXXFLAGS_COMMON[@]}" "${OBJECTS[@]}" "$ROOT/tools/lsp/main.cpp" -o "$BUILD/aegis-lsp"
+
+echo "LINK aegis-repl"
+"$CXX" "${CXXFLAGS_COMMON[@]}" "${OBJECTS[@]}" "$ROOT/tools/repl/main.cpp" -o "$BUILD/aegis-repl"
+
+echo "LINK aegis-fmt"
+"$CXX" "${CXXFLAGS_COMMON[@]}" "${OBJECTS[@]}" "$ROOT/tools/fmt/main.cpp" -o "$BUILD/aegis-fmt"
+
 echo "OK -> $BUILD/aegisc"
+echo "OK -> $BUILD/aegis-lsp"
+echo "OK -> $BUILD/aegis-repl"
+echo "OK -> $BUILD/aegis-fmt"

@@ -1,4 +1,4 @@
-// frontend/Lowerer.h — Lowers an ASTModule into an IR Graph.
+// frontend/Lowering.hpp — Lowers an ASTModule into an IR Graph.
 // ============================================================
 // Law (Section §1 of spec): lowering is the boundary where the IR is
 // constructed. All node creation goes through a HashCons so Pure nodes
@@ -7,7 +7,10 @@
 // ============================================================
 #pragma once
 #include <expected>
+#include <unordered_map>
+
 #include "aegis/support/Expected.hpp"
+#include "aegis/support/Primitives.hpp"
 #include "aegis/support/StringIntern.hpp"
 #include "aegis/frontend/AST.hpp"
 #include "aegis/frontend/Lexer.hpp"
@@ -32,6 +35,18 @@ private:
     NodeId       current_ctrl_{kInvalidNodeId};
     NodeId       current_eff_{kInvalidNodeId};
 
+    // Variable bindings: maps an interned identifier (SymbolId) to the
+    // NodeId that produces its value. Updated by `let` / `var` statements
+    // and read by `ASTIdent` expressions. This is what was missing in
+    // the initial prototype — the Lowerer was discarding the let-bound
+    // value, so reads of the binding were lowered as fresh Parameter
+    // placeholders instead of pointing at the value's producer node.
+    std::unordered_map<SymbolId, NodeId> bindings_;
+
+    // Function parameters: maps a parameter name SymbolId to the NodeId
+    // of its Parameter node. Set by lower_fn.
+    std::unordered_map<SymbolId, NodeId> params_;
+
     // Translate a single statement. Updates current_ctrl_ / current_eff_.
     Expected<bool> lower_stmt(const ASTNode& n);
 
@@ -41,6 +56,14 @@ private:
     // Translate a function. Sets up Start node outputs (control + effect)
     // and the body.
     Expected<bool> lower_fn(const ASTFnDecl& fn);
+
+    // Reset per-function state.
+    void reset_function_state() {
+        current_ctrl_ = kInvalidNodeId;
+        current_eff_  = kInvalidNodeId;
+        bindings_.clear();
+        params_.clear();
+    }
 };
 
 } // namespace aegis

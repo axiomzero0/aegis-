@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     // ---- Optimization pipeline ----
     if (cli.run_passes) {
         aegis::PassManager pm(g);
-        auto passes = aegis::build_standard_pipeline();
+        auto passes = aegis::passes::mid::build_standard_pipeline();
         for (auto& p : passes) pm.add(std::move(p));
         pm.run(cli.jit_mode ? aegis::CompileMode::JIT
                              : aegis::CompileMode::AOT);

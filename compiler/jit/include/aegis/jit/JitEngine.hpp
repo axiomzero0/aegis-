@@ -15,9 +15,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 
@@ -68,10 +71,18 @@ private:
         std::atomic<uint64_t>   invocations;   // hotness counter
         uint32_t                 threshold;
     };
+    struct CompileJob {
+        uint64_t    fn_id;
+        CompiledFn aot_entry;
+    };
+
     std::unordered_map<uint64_t, std::unique_ptr<Entry>> entries_;
-    std::thread compiler_thread_;
-    std::atomic<bool> shutdown_{false};
-    JitStats stats_;
+    std::mutex                   queue_mutex_;
+    std::condition_variable     queue_cv_;
+    std::deque<CompileJob>      pending_;
+    std::atomic<bool>           shutdown_{false};
+    std::thread                 worker_;
+    JitStats                    stats_;
 };
 
 } // namespace aegis::jit

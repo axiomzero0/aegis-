@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace aegis::pgo {
@@ -43,7 +44,8 @@ public:
     [[nodiscard]] uint32_t register_counter();
 
     // Per-thread accessor: mutator threads bump counters at runtime.
-    [[nodiscard]] Counter& counter(uint32_t id) { return counters_[id]; }
+    [[nodiscard]] Counter& counter(uint32_t id) { return *counters_[id]; }
+    [[nodiscard]] const Counter& counter(uint32_t id) const { return *counters_[id]; }
 
     // Serialize all counters to a flat buffer (for profile dump on shutdown).
     [[nodiscard]] std::vector<uint8_t> serialize() const;
@@ -51,8 +53,12 @@ public:
     // Load counters from a flat buffer (consumed by the JIT on startup).
     void deserialize(const std::vector<uint8_t>& bytes);
 
+    [[nodiscard]] size_t num_counters() const noexcept { return counters_.size(); }
+
 private:
-    std::vector<Counter> counters_{};
+    // unique_ptr because std::atomic is non-movable, and vector growth
+    // requires movable elements.
+    std::vector<std::unique_ptr<Counter>> counters_{};
 };
 
 } // namespace aegis::pgo
