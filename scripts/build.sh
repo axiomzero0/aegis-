@@ -104,6 +104,7 @@ JIT=(
 PGO=(
     pgo/src/Profiler.cpp
     pgo/src/ProfileData.cpp
+    pgo/src/Telemetry.cpp
 )
 RUNTIME_SRC=(
     runtime/core/src/panic.cpp
@@ -167,6 +168,7 @@ HOT_SET=(
     "jit/src/MemManager.cpp"
     "pgo/src/Profiler.cpp"
     "pgo/src/ProfileData.cpp"
+    "pgo/src/Telemetry.cpp"
 )
 
 is_hot() {

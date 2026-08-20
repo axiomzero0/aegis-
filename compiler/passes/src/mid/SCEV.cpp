@@ -26,6 +26,7 @@
 #include "aegis/passes/mid/SCEV.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/ir/NodeShape.hpp"
 
 #include <unordered_map>
 
@@ -43,7 +44,7 @@ int SCEVAnalysis::run() noexcept {
             Node& phi = g_[user];
             if (phi.kind != NodeKind::Phi) continue;
             // phi.inputs = {loop_id, start_val, back_val}.
-            if (phi.inputs.size() != 3) continue;
+            if (phi.inputs.size() != ir::shape::kPhiInputs2Branches) continue;
             NodeId start = phi.inputs[1];
             NodeId back  = phi.inputs[2];
             if (start == kInvalidNodeId || back == kInvalidNodeId) continue;

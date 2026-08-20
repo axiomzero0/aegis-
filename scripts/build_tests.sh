@@ -21,6 +21,10 @@ CXXFLAGS=(
     -I"$ROOT/compiler/backend/include"
     -I"$ROOT/compiler/jit/include"
     -I"$ROOT/compiler/pgo/include"
+    -I"$ROOT/runtime/core/include"
+    -I"$ROOT/runtime/alloc/include"
+    -I"$ROOT/runtime/sync/include"
+    -I"$ROOT/runtime/io/include"
     -DAEGIS_HOT_PATH=1 -DAEGIS_VERIFY_IR=1
 )
 
@@ -78,8 +82,21 @@ build_test() {
     echo "OK -> $BUILD/$name"
 }
 
+# Telemetry + runtime I/O sources (needed because PassManager now
+# emits telemetry on budget exceeded + verifier failed, and the
+# telemetry sink writes to stderr via runtime io).
+PGO_SRC=(
+    "$ROOT/compiler/pgo/src/Profiler.cpp"
+    "$ROOT/compiler/pgo/src/ProfileData.cpp"
+    "$ROOT/compiler/pgo/src/Telemetry.cpp"
+)
+RUNTIME_IO_SRC=(
+    "$ROOT/runtime/io/src/syscall.cpp"
+)
+
 build_test test_core_containers "${SUPPORT_SRC[@]}"
 build_test test_ir_graph "${SUPPORT_SRC[@]}" "${IR_SRC[@]}"
-build_test test_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}"
+build_test test_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
 build_test test_frontend_smoke "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${FRONTEND_SRC[@]}"
-build_test test_new_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}"
+build_test test_new_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
+build_test test_telemetry "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"

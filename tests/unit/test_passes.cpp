@@ -90,7 +90,7 @@ int test_gvn_is_idempotent() {
 
     GVNPass pass;
     PassBudget b_;
-    int r1 = pass.run(g, b_);
+    pass.run(g, b_);            // first pass: may remove duplicates
     int r2 = pass.run(g, b_);
     // First pass removes some nodes; second pass should be a no-op (0 changes).
     assert(r2 == 0);

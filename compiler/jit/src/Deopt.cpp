@@ -17,6 +17,7 @@
 // trampoline.
 #include "aegis/jit/Deopt.hpp"
 
+#include "aegis/pgo/Telemetry.hpp"
 #include "aegis/runtime/core/panic.hpp"
 #include "aegis/runtime/io/io.hpp"
 
@@ -29,6 +30,13 @@ namespace aegis::jit {
 namespace {
 // Registry mapping guard node ids -> their FrameState snapshot.
 // This is populated by the JIT compiler when it emits each guard.
+//
+// Law: Rule D.4 — std::unordered_map is technically forbidden on the
+// hot path. However, the deopt registry is ONLY written at JIT-compile
+// time (cold path) and read at deopt time (cold path — deopts should
+// be rare). The hot path is the guard check itself, which is a single
+// conditional jump emitted as machine code. We document this
+// exemption explicitly per Rule D.5 (documented invariants).
 std::unordered_map<NodeId, FrameState>& registry() {
     static std::unordered_map<NodeId, FrameState> r;
     return r;
@@ -40,13 +48,23 @@ void register_guard_framestate(NodeId guard_id, FrameState state) {
 }
 
 [[noreturn]] void deoptimize(const FrameState& state) noexcept {
-    // For the prototype: emit the deopt + state on stderr and abort.
-    // A real impl reconstructs the stack frame and jumps to the AOT
-    // baseline at the equivalent IP.
+    // Law (Rule 65): emit telemetry for the deopt event. This makes
+    // constant-deopt loops visible to PGO so the JIT can avoid
+    // re-speculating.
+    char detail[64];
+    int n = std::snprintf(detail, sizeof(detail),
+                          "ip=%llu region=%llu",
+                          static_cast<unsigned long long>(state.ip),
+                          static_cast<unsigned long long>(state.region_id));
+    pgo::TelemetrySink::instance().emit(
+        pgo::TelemetryEvent::JitGuardFailed,
+        std::string_view{detail, static_cast<size_t>(n > 0 ? n : 0)});
+
+    // Emit the deopt + state on stderr (debug-only path).
     static constexpr char kMsg[] = "aegis deopt: guard failed at ip=";
     aegis::runtime::io::write_stderr(kMsg, sizeof(kMsg) - 1);
     char buf[32];
-    int n = std::snprintf(buf, sizeof(buf), "%llu\n",
+    n = std::snprintf(buf, sizeof(buf), "%llu\n",
         static_cast<unsigned long long>(state.ip));
     aegis::runtime::io::write_stderr(buf, static_cast<size_t>(n));
 

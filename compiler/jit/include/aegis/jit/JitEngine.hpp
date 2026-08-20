@@ -24,6 +24,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include "aegis/jit/JitConstants.hpp"
+
 namespace aegis::jit {
 
 // Function entry point type (the calling convention for compiled code).
@@ -46,8 +48,11 @@ public:
 
     // Register an AOT-compiled function so the engine can monitor its
     // hotness and trigger JIT recompilation when needed.
+    //
+    // Law: Rule 61 — the default threshold comes from JitConstants.hpp
+    // (kDefaultHotThreshold), not a magic 1000.
     void register_function(uint64_t fn_id, CompiledFn aot_entry,
-                           uint32_t hot_threshold = 1000);
+                           uint32_t hot_threshold = constants::kDefaultHotThreshold);
 
     // Called by the AOT code's prologue on each invocation to bump the
     // invocation counter. MUST be inlined + branchless on the fast path

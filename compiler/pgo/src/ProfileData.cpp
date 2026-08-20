@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstring>
 
+#include "aegis/pgo/Telemetry.hpp"
+
 namespace aegis::pgo {
 
 namespace {
@@ -24,15 +26,30 @@ uint64_t now_micros() {
 } // namespace
 
 bool ProfileData::load(std::span<const uint8_t> bytes) {
-    if (bytes.size() < sizeof(ProfileHeader)) return false;
+    if (bytes.size() < sizeof(ProfileHeader)) {
+        // Law (Rule 65): emit telemetry — silent return false is forbidden.
+        TelemetrySink::instance().emit(
+            TelemetryEvent::ProfileDataCorrupt, "header_too_small");
+        return false;
+    }
     std::memcpy(&header_, bytes.data(), sizeof(ProfileHeader));
-    if (std::memcmp(header_.magic, "AEGISPGO", 8) != 0) return false;
+    if (std::memcmp(header_.magic, "AEGISPGO", 8) != 0) {
+        // Law (Rule 65): emit telemetry.
+        TelemetrySink::instance().emit(
+            TelemetryEvent::ProfileDataCorrupt, "magic_mismatch");
+        return false;
+    }
     // Read counters.
     counters_.clear();
     counters_.reserve(header_.num_counters);
     const uint8_t* p = bytes.data() + sizeof(ProfileHeader);
     const size_t remaining = bytes.size() - sizeof(ProfileHeader);
-    if (remaining < header_.num_counters * sizeof(uint64_t)) return false;
+    if (remaining < header_.num_counters * sizeof(uint64_t)) {
+        // Law (Rule 65): emit telemetry.
+        TelemetrySink::instance().emit(
+            TelemetryEvent::ProfileDataCorrupt, "counter_truncated");
+        return false;
+    }
     for (uint32_t i = 0; i < header_.num_counters; ++i) {
         uint64_t v;
         std::memcpy(&v, p + i * sizeof(uint64_t), sizeof(uint64_t));

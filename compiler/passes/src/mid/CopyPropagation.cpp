@@ -21,6 +21,7 @@
 #include "aegis/passes/mid/CopyPropagation.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/ir/NodeShape.hpp"
 
 namespace aegis::passes::mid {
 
@@ -42,8 +43,10 @@ int CopyPropagationPass::run(Graph& g, const PassBudget& budget) {
             }
         } else if (n.kind == NodeKind::Select) {
             // Identical branches: c ? a : a -> a.
+            // Law: Rule 61 — kSelectInputs is the named constant, not
+            // a magic 3.
             auto d = n.data_ins();
-            if (d.size() == 3 && d[1] == d[2]) {
+            if (d.size() == ir::shape::kSelectInputs && d[1] == d[2]) {
                 replacement = d[1];
             }
         } else if (n.kind == NodeKind::Phi) {

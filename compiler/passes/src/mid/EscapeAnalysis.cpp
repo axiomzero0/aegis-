@@ -30,6 +30,7 @@
 #include "aegis/passes/mid/EscapeAnalysis.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/ir/NodeShape.hpp"
 
 namespace aegis::passes::mid {
 
@@ -72,8 +73,11 @@ bool escapes(Graph& g, NodeId alloc_id) {
             if (u.flags.has(NodeFlagBit::IsDead)) continue;
             // ---- Escape triggers (the pointer is being moved out) ----
             if (u.kind == NodeKind::Return) {
-                if (u.inputs.size() == 3 && u.inputs[2] == cur) return true;
-                continue; // val != pointer; we don't walk past Return.
+                // Return inputs = {ctrl, eff, val}. If val == cur, the
+                // pointer is being returned -> escape.
+                if (u.inputs.size() == ir::shape::kReturnInputs &&
+                    u.inputs[ir::shape::kReturnValIndex] == cur) return true;
+                continue;
             }
             if (u.kind == NodeKind::CallPure ||
                 u.kind == NodeKind::CallAltered ||

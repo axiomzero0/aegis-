@@ -25,6 +25,7 @@
 #include "aegis/passes/mid/TCO.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/ir/NodeShape.hpp"
 
 namespace aegis::passes::mid {
 
@@ -35,7 +36,7 @@ int TailCallOptPass::run(Graph& g, const PassBudget& budget) {
         if (n.flags.has(NodeFlagBit::IsDead)) continue;
         if (n.kind != NodeKind::Return) continue;
         // Return convention: inputs = {ctrl, eff, val}.
-        if (n.inputs.size() != 3) continue;
+        if (n.inputs.size() != ir::shape::kReturnInputs) continue;
         NodeId ctrl = n.inputs[0];
         NodeId eff  = n.inputs[1];
         NodeId val  = n.inputs[2];

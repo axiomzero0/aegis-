@@ -13,6 +13,9 @@
 
 #include <chrono>
 
+#include "aegis/jit/JitConstants.hpp"
+#include "aegis/pgo/Telemetry.hpp"
+
 namespace aegis::jit {
 
 JitEngine::~JitEngine() {
@@ -37,14 +40,22 @@ void JitEngine::on_call(uint64_t fn_id) noexcept {
     uint64_t count = e.invocations.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count == e.threshold) [[unlikely]] {
         // Crossed threshold — enqueue a compile job. We use try_lock
-        // to avoid blocking on the hot path. If we can't get the lock
-        // (rare — another thread is enqueuing), the next hot invocation
-        // will retry.
+        // to avoid blocking on the hot path.
+        //
+        // Law (Rule 65): when the queue is full, we emit telemetry
+        // (JitQueueFullSkipped) instead of silently dropping the job.
         if (queue_mutex_.try_lock()) {
             std::lock_guard<std::mutex> lk(queue_mutex_, std::adopt_lock);
-            pending_.push_back(CompileJob{fn_id,
-                e.current.load(std::memory_order_acquire)});
-            queue_cv_.notify_one();
+            if (pending_.size() < constants::kMaxPendingJobs) {
+                pending_.push_back(CompileJob{fn_id,
+                    e.current.load(std::memory_order_acquire)});
+                queue_cv_.notify_one();
+            } else {
+                // Queue full — emit telemetry.
+                pgo::TelemetrySink::instance().emit(
+                    pgo::TelemetryEvent::JitQueueFullSkipped,
+                    "queue_full");
+            }
         }
         stats_.compiles_started.fetch_add(1, std::memory_order_relaxed);
     }

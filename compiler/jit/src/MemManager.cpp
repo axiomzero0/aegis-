@@ -23,6 +23,9 @@
 #include <algorithm>
 #include <cstring>
 
+#include "aegis/backend/TargetConstants.hpp"
+#include "aegis/jit/JitConstants.hpp"
+
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h>
 #include <unistd.h>
@@ -46,10 +49,19 @@ MemManager::~MemManager() {
 
 void* MemManager::allocate(size_t size, uint64_t epoch) {
     std::lock_guard<std::mutex> lk(mutex_);
+    // Law: Rule 66 — No Assumption of Stable Hardware. The page size
+    // is queried at runtime via sysconf() (Linux/macOS) or
+    // GetSystemInfo() (Windows). We do NOT hard-code 4096 — Apple
+    // Silicon uses 16384-byte pages, ARM64 Linux can use 64K pages.
 #if defined(__linux__) || defined(__APPLE__)
-    // Map RWX. The mmap returns page-aligned memory.
     long pagesize = ::sysconf(_SC_PAGESIZE);
-    size_t aligned_size = (size + pagesize - 1) & ~(static_cast<size_t>(pagesize) - 1);
+    // Fallback if sysconf fails (returns -1). Use the documented
+    // default from TargetConstants (4096 on most current x86-64/ARM64).
+    if (pagesize <= 0) {
+        pagesize = static_cast<long>(backend::constants::kDefaultPageSize);
+    }
+    size_t aligned_size = (size + static_cast<size_t>(pagesize) - 1)
+                          & ~(static_cast<size_t>(pagesize) - 1);
     void* mem = ::mmap(nullptr, aligned_size,
                        PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS,
@@ -58,12 +70,14 @@ void* MemManager::allocate(size_t size, uint64_t epoch) {
 #elif defined(_WIN32)
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    size_t aligned_size = (size + si.dwPageSize - 1) & ~(static_cast<size_t>(si.dwPageSize) - 1);
+    size_t aligned_size = (size + si.dwPageSize - 1)
+                          & ~(static_cast<size_t>(si.dwPageSize) - 1);
     void* mem = ::VirtualAlloc(nullptr, aligned_size,
                               MEM_COMMIT | MEM_RESERVE,
                               PAGE_EXECUTE_READWRITE);
     if (mem == nullptr) return nullptr;
 #else
+    (void)size; (void)epoch;
     return nullptr;
 #endif
     Page p{mem, aligned_size, epoch, true};
