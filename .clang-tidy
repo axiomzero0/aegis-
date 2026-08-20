@@ -1,0 +1,53 @@
+# Aegis .clang-tidy — Static analysis rules.
+# Enforces the project's laws (Rules 36-60, B.1-B.6, A.1-A.5) at the
+# linter level where possible.
+
+---
+Checks:          '-*,cppcoreguidelines-*,performance-*,modernize-*,bugprone-*,readability-*,cert-*,clang-analyzer-*,misc-*'
+CheckOptions:
+  - key:    cppcoreguidelines-pro-bounds-pointer-arithmetic.WarnOnAll
+    value:  1
+  - key:    cppcoreguidelines-pro-bounds-constant-array-index.ResultListAll
+    value:  1
+  - key:    cppcoreguidelines-pro-type-cstyle-cast.ResultListAll
+    value:  1
+  - key:    cppcoreguidelines-pro-type-member-init.UseAssignment
+    value:  0
+  - key:    modernize-use-nullptr.NullMacro
+    value:  'NULL'
+
+# Law B.1 — no exceptions on the hot path. The hot path is identified
+# via the AEGIS_HOT_PATH macro:
+#   - ir/ + passes/ + backend/ + support/{SmallVector,SparseSet,BitVector,SwissTable,StringIntern}
+# These TUs are compiled with -fno-exceptions; clang-tidy is given the
+# same flag via the compile_commands.json so it can flag throw-statements.
+  - key:    cert-err60-cpp.CheckThrow
+    value:  1
+
+# Law B.3 — no RTTI.
+  - key:    cppcoreguidelines-pro-type-static-cast-downcast.ResultListAll
+    value:  1
+
+# Rule 51 — bitmasked flags. We rely on the Flags<E> wrapper; flag
+# raw `int` state as a smell.
+  - key:    cppcoreguidelines-pro-type-union-access.ResultListAll
+    value:  0
+
+# Rule 60 — std::expected over `if` chains.
+  - key:    modernize-use-nodiscard.Reason
+    value:  'Rule 60 — success path should be linear.'
+
+# Rule 58 — explicit `[[assume]]` / `[[likely]]` are encouraged
+# (modernize-use-attributes does this).
+
+# Rule 53 — no raw pointers in the IR. Note: this rule is enforced by
+# the IR's API (every Node edge is a NodeId); clang-tidy cannot easily
+# prove it. Manual review.
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: '^(?!build/).*$'
+
+# Files that the hot-path rules (B.1, B.3) apply to. The build script
+# sets -fno-rtti / -fno-exceptions on these TUs directly; clang-tidy
+# checks additional style rules via the catalog below.

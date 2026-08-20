@@ -1,0 +1,83 @@
+# Aegis .clang-format — Strict C++26 formatting rules.
+# All compiler and runtime sources must conform to this style. CI runs
+# `clang-format --dry-run` on every PR; non-conformance blocks merge.
+
+---
+Language:        Cpp
+Standard:        c++26
+BasedOnStyle:    LLVM
+
+# ---------- Indentation ----------
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+ConstructorInitializerIndentWidth: 4
+IndentCaseLabels:  true
+IndentPPDirectives: BeforeHash
+
+# ---------- Brace style ----------
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass:        true
+  AfterStruct:       true
+  AfterEnum:         true
+  AfterUnion:        true
+  AfterFunction:     true
+  AfterControlStatement: Never
+  BeforeCatch:       true
+  BeforeElse:        false
+  IndentBraces:      false
+  SplitEmptyRecord:  false
+
+# ---------- Line length ----------
+ColumnLimit:      100
+ReflowComments:   true
+
+# ---------- Includes ----------
+IncludeBlocks:    Regroup
+IncludeCategories:
+  - Regex:         '^<[a-zA-Z_]+>'        # C++ std headers
+    Priority:      100
+  - Regex:         '^"aegis/'              # project headers (aegis/*)
+    Priority:      50
+  - Regex:         '^".*\.hpp"'            # project headers (relative)
+    Priority:      40
+  - Regex:         '.*'                    # everything else
+    Priority:      10
+SortIncludes:      CaseSensitive
+IncludeStyle:     MainFile
+
+# ---------- Pointer/reference alignment ----------
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# ---------- Spacing ----------
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 1
+SpacesInParentheses: false
+SpaceAroundPointers: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeSquareBrackets: false
+SpaceAfterCStyleCast: false
+
+# ---------- Alignment ----------
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: AcrossEmptyLines
+AlignConsecutiveDeclarations: AcrossEmptyLines
+AlignEscapedNewlines: Left
+AlignOperands:      Align
+AlignTrailingComments: true
+
+# ---------- Short forms ----------
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortEnumsOnASingleLine: false
+
+# ---------- Penalty (tuning) ----------
+PenaltyBreakBeforeFirstCallParameter: 19
+PenaltyBreakStringLiteral:             1000
+PenaltyReturnTypeOnItsOwnLine:         1000
