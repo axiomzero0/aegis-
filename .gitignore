@@ -1,0 +1,76 @@
+# ============================================================
+# Aegis Compiler - .gitignore
+# ============================================================
+# Rule 50: Versioned caches/artifacts — but never commit them.
+# ============================================================
+
+# ---- Secrets / Credentials (Rule: NEVER commit) ----
+# Token lives at /home/z/my-project/.secrets/github_token.txt
+# (outside this repo entirely). Also belt-and-suspenders here:
+*.token
+*.pat
+*.secret
+.env
+.env.*
+secrets/
+**/credentials*
+**/credentials.txt
+
+# ---- Build artifacts ----
+build/
+build-*/
+out/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# ---- CMake ----
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+compile_commands.json
+*.cmake
+!CMakeLists.txt
+!*.cmake.in
+
+# ---- Compiler / IDE ----
+.cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ---- Test / CI artifacts ----
+*.out
+*.actual
+*.diff
+test-results/
+coverage/
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# ---- AOT / JIT cache artifacts (Rule 50) ----
+*.aot-cache
+*.jit-cache
+*.pgo-profile
+
+# ---- Replay logs (Rule 40) ----
+replay-artifacts/
+
+# ---- Doxygen ----
+docs/html/
+docs/latex/

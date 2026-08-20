@@ -1,0 +1,5 @@
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Constant (Pure) value=3 ins=[]
+n4 : Return (Pure) ins=[1,2,3]
