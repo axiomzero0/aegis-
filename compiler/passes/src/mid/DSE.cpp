@@ -18,9 +18,8 @@
 #include "aegis/passes/mid/DSE.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
-
-#include <unordered_map>
-#include <unordered_set>
+#include "aegis/support/SparseSet.hpp"
+#include "aegis/support/SwissTable.hpp"
 
 namespace aegis::passes::mid {
 
@@ -29,7 +28,11 @@ int DeadStoreElimPass::run(Graph& g, const PassBudget& budget) {
 
     // Step 1: find pointers that are loaded from. A Store to a pointer
     // that's never read is dead.
-    std::unordered_set<NodeId> pointers_read_from;
+    //
+    // Law: Rule D.4 — use SparseSet for the visited-pointer set since
+    // NodeIds are dense and small (O(1) insert + clear, no per-element
+    // allocation).
+    SparseSet pointers_read_from(g.size());
     for (NodeId id = 0; id < g.size(); ++id) {
         const Node& n = g[id];
         if (n.flags.has(NodeFlagBit::IsDead)) continue;
@@ -43,7 +46,9 @@ int DeadStoreElimPass::run(Graph& g, const PassBudget& budget) {
     //   - if no Load on its pointer exists downstream before the next
     //     Store on the same pointer, it's dead.
     //   - if the pointer is never loaded from anywhere, it's dead.
-    std::unordered_map<NodeId, NodeId> last_store_per_ptr;
+    //
+    // Law: Rule D.4 — use SwissTable for the pointer -> last_store map.
+    SwissTable<NodeId, NodeId> last_store_per_ptr;
     NodeId current_eff = kInvalidNodeId;
     for (NodeId id = 0; id < g.size(); ++id) {
         if (g[id].kind == NodeKind::Start) {
@@ -73,24 +78,21 @@ int DeadStoreElimPass::run(Graph& g, const PassBudget& budget) {
             NodeId ptr = d.empty() ? kInvalidNodeId : d[0];
             if (ptr == kInvalidNodeId) continue;
             // If the pointer is never read from anywhere, this Store is dead.
-            if (pointers_read_from.find(ptr) == pointers_read_from.end()) {
+            if (!pointers_read_from.contains(ptr)) {
                 g[cursor].flags.set(NodeFlagBit::IsDead);
                 ++removed;
                 continue;
             }
             // If a previous Store on this pointer happened and no Load
             // intervened, the previous Store is dead.
-            auto it = last_store_per_ptr.find(ptr);
-            if (it != last_store_per_ptr.end()) {
-                g[it->second].flags.set(NodeFlagBit::IsDead);
+            if (NodeId* prev_p = last_store_per_ptr.get(ptr); prev_p != nullptr) {
+                g[*prev_p].flags.set(NodeFlagBit::IsDead);
                 ++removed;
-                it->second = cursor;
+                *prev_p = cursor;
             } else {
-                last_store_per_ptr[ptr] = cursor;
+                last_store_per_ptr.insert(ptr, cursor);
             }
         } else if (node.kind == NodeKind::Load) {
-            // A Load invalidates the cached last-store on its pointer
-            // (we read the stored value).
             auto d = node.data_ins();
             NodeId ptr = d.empty() ? kInvalidNodeId : d[0];
             if (ptr != kInvalidNodeId) {

@@ -117,6 +117,18 @@ public:
         }
     }
 
+    // Iterate over all live (key, value) entries. Order is unspecified.
+    // Used by passes / the lowerer that need to walk the full map.
+    template <typename F>
+    void for_each(F&& f) const
+        noexcept(noexcept(f(std::declval<const K&>(), std::declval<const V&>()))) {
+        for (size_t i = 0; i < capacity_; ++i) {
+            uint8_t c = ctrl_[i];
+            if (c & detail::kCtrlLiveMask) continue; // empty or deleted
+            f(slots_[i].key, slots_[i].val);
+        }
+    }
+
 private:
     struct Slot { K key{}; V val{}; };
 

@@ -1,9 +1,17 @@
 // backend/LinearScan.cpp — Phase 1 register allocator implementation.
+//
+// Uses constants from passes/PassConstants.hpp (Rule 61 / D.1):
+//   - kLinearScanMaxPRegs bounds the `used[]` array.
+//   - kLinearScanDefaultSpillCost is the weight applied to the spill
+//     heuristic when no PGO profile is available.
 #include "aegis/backend/RegAlloc/LinearScan.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
+
+#include "aegis/passes/PassConstants.hpp"
 
 namespace aegis {
 
@@ -74,10 +82,16 @@ uint32_t LinearScanAllocator::run() {
         uint16_t num_preg = (iv.rc == RegClass::Float) ? num_fpr_ : num_gpr_;
 
         // Find a free PReg by scanning active entries.
+        // Law: Rule 61 — kLinearScanMaxPRegs is a named constant, not
+        // a magic 256. Sized via PassConstants.hpp.
         PRegId free_preg = static_cast<PRegId>(-1);
-        bool used[256] = {};
+        constexpr uint32_t kUsedArraySize =
+            aegis::passes::constants::kLinearScanMaxPRegs;
+        std::array<bool, kUsedArraySize> used{};
         for (const ActiveEntry& e : active) {
-            if (e.preg < 256) used[e.preg] = true;
+            if (e.preg < kUsedArraySize) {
+                used[e.preg] = true;
+            }
         }
         for (PRegId p = 0; p < num_preg; ++p) {
             if (!used[p]) { free_preg = p; break; }

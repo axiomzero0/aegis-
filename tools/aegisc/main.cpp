@@ -26,6 +26,8 @@
 #include "aegis/passes/mid/StandardPipeline.hpp"
 #include "aegis/backend/InstrSel.hpp"
 #include "aegis/backend/RegAlloc/LinearScan.hpp"
+#include "aegis/backend/Target.hpp"
+#include "aegis/backend/x86/Target_x86.hpp"
 
 #ifdef AEGIS_VERIFY_IR
 static constexpr bool kVerifyByDefault = true;
@@ -167,7 +169,14 @@ int main(int argc, char** argv) {
     // ---- Instruction selection + register allocation ----
     aegis::InstrSelector sel(g);
     auto mf = sel.lower("main");
-    aegis::LinearScanAllocator lsa(mf, /*num_gpr=*/12, /*num_fpr=*/12);
+    // Query the Target interface for the actual register file shape
+    // (Rule 66 — No Assumption of Stable Hardware). We default to
+    // x86-64; a real driver takes a --target= flag and picks ARM64
+    // or other targets here.
+    aegis::backend::x86::TargetX8664 target;
+    uint16_t num_gpr = target.num_regs(aegis::backend::RegClass::General);
+    uint16_t num_fpr = target.num_regs(aegis::backend::RegClass::Float);
+    aegis::LinearScanAllocator lsa(mf, num_gpr, num_fpr);
     uint32_t spills = lsa.run();
     (void)spills;
     if (cli.dump_mir) {

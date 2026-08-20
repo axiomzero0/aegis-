@@ -10,7 +10,8 @@ TESTS="$ROOT/tests/unit"
 CXX=g++
 CXXFLAGS=(
     -std=c++26 -fno-rtti
-    -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-missing-field-initializers
+    -Wall -Wextra -Wpedantic -Werror
+    -Wno-unused-parameter -Wno-missing-field-initializers
     -Wno-unused-function -Wno-deprecated -Wno-unused-but-set-variable -Wno-unused-result
     -O2 -g0
     -I"$ROOT/compiler/support/include"

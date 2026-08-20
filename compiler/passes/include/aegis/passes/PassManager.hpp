@@ -3,6 +3,7 @@
 #include <vector>
 #include "aegis/ir/Graph.hpp"
 #include "aegis/passes/Pass.hpp"
+#include "aegis/passes/PassConstants.hpp"
 
 namespace aegis {
 
@@ -25,7 +26,12 @@ public:
 private:
     Graph& g_;
     std::vector<std::unique_ptr<Pass>> passes_{};
-    int fixpoint_budget_per_pass_{5}; // max iterations per pass to detect non-idempotency
+    // Law: Rule 61 — uses a named constant from PassConstants.hpp,
+    // not a magic 5. The constant is uint32_t; we cast to int (the
+    // field type). Using `=` instead of `{}` allows the implicit
+    // narrowing conversion.
+    int fixpoint_budget_per_pass_ =
+        static_cast<int>(passes::constants::kFixpointBudgetPerPass);
 };
 
 } // namespace aegis

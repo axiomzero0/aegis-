@@ -15,11 +15,11 @@
 // bounds check elimination) via the SCEV handle.
 #pragma once
 #include <cstdint>
-#include <unordered_map>
 
 #include "aegis/ir/Graph.hpp"
 #include "aegis/passes/Pass.hpp"
 #include "aegis/support/Primitives.hpp"
+#include "aegis/support/SwissTable.hpp"
 
 namespace aegis::passes::mid {
 
@@ -41,6 +41,9 @@ struct SCEVExpr {
     NodeId   operand_b{kInvalidNodeId};
     bool     operator==(const SCEVExpr&) const noexcept = default;
 };
+static_assert(std::is_trivially_destructible_v<SCEVExpr>,
+              "SCEVExpr must be trivially destructible so it can be stored "
+              "as a value in SwissTable (Rule D.4 / Rule 55).");
 
 class SCEVAnalysis {
 public:
@@ -60,7 +63,10 @@ public:
 
 private:
     Graph& g_;
-    std::unordered_map<NodeId, SCEVExpr> map_;
+    // Law: Rule D.4 — use SwissTable, not std::unordered_map. SCEVExpr
+    // is trivially destructible (static_asserted above) so it can be
+    // stored as a value type in SwissTable's flat array.
+    SwissTable<NodeId, SCEVExpr> map_;
 };
 
 class SCEVPass : public Pass {

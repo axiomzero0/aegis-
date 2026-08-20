@@ -18,6 +18,8 @@
 
 #include <cstdint>
 
+#include "aegis/support/Assert.hpp"
+
 namespace aegis {
 
 enum class NodeKind : uint16_t {
@@ -158,12 +160,15 @@ enum class EffectClass : uint8_t {
         case NodeKind::ProfiledEntry:  return "ProfiledEntry";
         case NodeKind::MachineOp:      return "MachineOp";
     }
-    return "<unknown>";
+    AEGIS_UNREACHABLE();
 }
 
 // Map a NodeKind to its effect class. Pure nodes are the default;
 // Altered nodes are anything that mutates memory or calls an Altered
 // function; Crowded nodes are atomics, fences, I/O calls, and guards.
+//
+// Law: Rule D.3 — switch is exhaustive on the closed enum. New
+// NodeKinds MUST be added here or the build will fail.
 [[nodiscard]] constexpr EffectClass effect_class_of(NodeKind k) noexcept {
     switch (k) {
         // ---- Altered (memory-mutating) ----
@@ -181,10 +186,55 @@ enum class EffectClass : uint8_t {
         case NodeKind::Guard:
         case NodeKind::Deopt:
             return EffectClass::Crowded;
-        // ---- Everything else is Pure ----
-        default:
+        // ---- Pure (structural + arithmetic + data) ----
+        case NodeKind::Start:
+        case NodeKind::Region:
+        case NodeKind::Loop:
+        case NodeKind::If:
+        case NodeKind::Proj:
+        case NodeKind::Return:
+        case NodeKind::Branch:
+        case NodeKind::Stop:
+        case NodeKind::Constant:
+        case NodeKind::Parameter:
+        case NodeKind::Phi:
+        case NodeKind::Add:
+        case NodeKind::Sub:
+        case NodeKind::Mul:
+        case NodeKind::Div:
+        case NodeKind::UDiv:
+        case NodeKind::Mod:
+        case NodeKind::UMod:
+        case NodeKind::And:
+        case NodeKind::Or:
+        case NodeKind::Xor:
+        case NodeKind::Shl:
+        case NodeKind::Shr:
+        case NodeKind::LShr:
+        case NodeKind::CmpEq:
+        case NodeKind::CmpNe:
+        case NodeKind::CmpLt:
+        case NodeKind::CmpLe:
+        case NodeKind::CmpGt:
+        case NodeKind::CmpGe:
+        case NodeKind::CmpUlt:
+        case NodeKind::CmpUle:
+        case NodeKind::CmpUgt:
+        case NodeKind::CmpUge:
+        case NodeKind::Neg:
+        case NodeKind::Not:
+        case NodeKind::StackAlloc:
+        case NodeKind::GetElementPtr:
+        case NodeKind::GetFieldPtr:
+        case NodeKind::Cast:
+        case NodeKind::Select:
+        case NodeKind::CallPure:
+        case NodeKind::FrameState:
+        case NodeKind::ProfiledEntry:
+        case NodeKind::MachineOp:
             return EffectClass::Pure;
     }
+    AEGIS_UNREACHABLE();
 }
 
 [[nodiscard]] constexpr bool is_pure(NodeKind k) noexcept {

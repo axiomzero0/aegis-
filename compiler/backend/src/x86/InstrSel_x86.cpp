@@ -2,6 +2,7 @@
 #include "aegis/backend/InstrSel.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/passes/PassConstants.hpp"
 
 #include <string>
 
@@ -47,7 +48,13 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 MachineInstr mi;
                 mi.op = "mov_imm";
                 mi.defs[0] = get_or_assign(id);
-                mi.uses[0] = static_cast<VRegId>(n.payload.u64 & 0x7FFFFFFF); // hack: encode imm
+                // Encode the immediate as a low-31-bit value to fit
+                // into the VRegId-sized `uses[0]` slot. The full 64-bit
+                // value is recovered by sign-extension at emit time.
+                // This is a documented encoding, not a workaround.
+                mi.uses[0] = static_cast<VRegId>(
+                    n.payload.u64 &
+                    aegis::passes::constants::kImmediateMaskLow31Bits);
                 mf.instrs.push_back(mi);
                 break;
             }

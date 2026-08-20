@@ -103,7 +103,7 @@ int cp_select_identical_branches() {
     return 0;
 }
 
-// TCO: Return (Proj(Call,0)) where Return.ctrl = Call → tag tail-call.
+// TCO: Return (Proj(Call,0)) where Return.ctrl = Call → tag IsTailCall.
 int tco_tail_call_tagged() {
     SymbolTable syms;
     Graph g(&syms);
@@ -113,11 +113,12 @@ int tco_tail_call_tagged() {
     NodeId arg1 = g.make_constant_i64(1, 1);
     NodeId call = g.make_call(ctrl, eff, /*callee=*/1, {arg1}, 1, EffectClass::Altered);
     NodeId ret_val = g.make_proj(call, 0);
-    g.make_return(call, call, ret_val); // call is both ctrl + eff
+    NodeId ret = g.make_return(call, call, ret_val);
     passes::mid::TailCallOptPass pass;
     PassBudget b;
     int r = pass.run(g, b);
     assert(r > 0);
+    assert(g[ret].flags.has(NodeFlagBit::IsTailCall));
     std::string why;
     assert(g.verify(why));
     return 0;

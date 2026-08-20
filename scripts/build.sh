@@ -22,7 +22,8 @@ CXX=g++
 # for ergonomics, but the IR/passes/backend must not.
 CXXFLAGS_COMMON=(
     -std=c++26 -fno-rtti
-    -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-missing-field-initializers
+    -Wall -Wextra -Wpedantic -Werror
+    -Wno-unused-parameter -Wno-missing-field-initializers
     -Wno-unused-function -Wno-deprecated -Wno-unused-but-set-variable
     -O2 -g0
     -I"$ROOT/compiler/support/include"

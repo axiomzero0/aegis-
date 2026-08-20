@@ -4,14 +4,18 @@
 // constructed. All node creation goes through a HashCons so Pure nodes
 // are canonicalized as they are built (Rule: "Hash-Consing ... Native
 // to SoN"; "GVN: Identifies redundant calculations. Native to SoN.").
+//
+// Law: Rule D.4 — No Lazy Data Structures. Uses SwissTable (not
+// std::unordered_map) for bindings / params lookups — these are hot
+// paths in the frontend.
 // ============================================================
 #pragma once
 #include <expected>
-#include <unordered_map>
 
 #include "aegis/support/Expected.hpp"
 #include "aegis/support/Primitives.hpp"
 #include "aegis/support/StringIntern.hpp"
+#include "aegis/support/SwissTable.hpp"
 #include "aegis/frontend/AST.hpp"
 #include "aegis/frontend/Lexer.hpp"
 #include "aegis/ir/Graph.hpp"
@@ -37,15 +41,16 @@ private:
 
     // Variable bindings: maps an interned identifier (SymbolId) to the
     // NodeId that produces its value. Updated by `let` / `var` statements
-    // and read by `ASTIdent` expressions. This is what was missing in
-    // the initial prototype — the Lowerer was discarding the let-bound
-    // value, so reads of the binding were lowered as fresh Parameter
-    // placeholders instead of pointing at the value's producer node.
-    std::unordered_map<SymbolId, NodeId> bindings_;
+    // and read by `ASTIdent` expressions.
+    //
+    // Law: Rule D.4 — use SwissTable (flat, open-addressing, cache-
+    // friendly) instead of std::unordered_map (which allocates per
+    // insertion and is forbidden in the hot path).
+    SwissTable<SymbolId, NodeId> bindings_{};
 
     // Function parameters: maps a parameter name SymbolId to the NodeId
-    // of its Parameter node. Set by lower_fn.
-    std::unordered_map<SymbolId, NodeId> params_;
+    // of its Parameter node.
+    SwissTable<SymbolId, NodeId> params_{};
 
     // Translate a single statement. Updates current_ctrl_ / current_eff_.
     Expected<bool> lower_stmt(const ASTNode& n);

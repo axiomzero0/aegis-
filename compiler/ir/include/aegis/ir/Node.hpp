@@ -48,6 +48,8 @@ enum class NodeFlagBit : uint32_t {
     IsStackPromoted= 1u << 12, // stack-promoted by escape analysis
     IsBoundsChecked= 1u << 13, // has a runtime bounds check attached
     IsLowered      = 1u << 14, // has been lowered to machine instrs
+    IsTailCall     = 1u << 15, // Return is a tail call (TCO-tagged)
+    IsHoisted     = 1u << 16,  // LICM-tagged: hoisted out of a loop
 };
 AEGIS_DEFINE_BITMASK_OPS(NodeFlagBit);
 

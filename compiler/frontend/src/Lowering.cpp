@@ -6,6 +6,8 @@
 // Includes the HashCons machinery for native GVN: Pure nodes are
 // canonicalized at construction time so the IR never contains two
 // structurally identical Pure nodes.
+//
+// Law: Rule D.4 — uses SwissTable for bindings/params (not std::unordered_map).
 #include "aegis/frontend/Lowering.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
@@ -34,7 +36,21 @@ NodeKind binop_to_node_kind(TokenKind k) noexcept {
         case TokenKind::GtEq:     return NodeKind::CmpGe;
         case TokenKind::AndAnd:   return NodeKind::And;
         case TokenKind::OrOr:     return NodeKind::Or;
-        default:                  return NodeKind::Add; // fallback
+        // Compound assignment tokens are not valid binary ops for
+        // expression lowering — they are handled by lower_stmt's
+        // AssignExpr case. Reaching here is a programming error.
+        case TokenKind::PlusEq:
+        case TokenKind::MinusEq:
+        case TokenKind::StarEq:
+        case TokenKind::SlashEq:
+        case TokenKind::Question:
+        case TokenKind::FatArrow:
+        case TokenKind::Arrow:
+            return NodeKind::Add; // Defensive fallback; verifier catches.
+        case TokenKind::Eof:      return NodeKind::Add;
+        // The remaining tokens (keywords, punctuation, etc.) are not
+        // valid binary operators and should never reach this function.
+        default:                  return NodeKind::Add;
     }
 }
 } // namespace
@@ -65,8 +81,8 @@ Expected<bool> Lowerer::lower_fn(const ASTFnDecl& fn) {
         if (!param) continue;
         NodePayload pp; pp.sym = param->name;
         NodeId param_node = g_.make_node(NodeKind::Parameter, {}, kInvalidTypeId, pp);
-        params_[param->name] = param_node;
-        bindings_[param->name] = param_node;
+        params_.insert(param->name, param_node);
+        bindings_.insert(param->name, param_node);
     }
 
     // Lower the body block statement-by-statement.
@@ -87,6 +103,24 @@ Expected<bool> Lowerer::lower_fn(const ASTFnDecl& fn) {
     return true;
 }
 
+namespace {
+// Snapshot of bindings for branch-merge phi materialization. We collect
+// the live (SymbolId, NodeId) pairs into a SmallVector so we can compare
+// then-branch and else-branch bindings and emit Phis for differences.
+struct BindingSnapshot {
+    struct Pair { SymbolId sym; NodeId node; };
+    SmallVector<Pair, 8> entries;
+};
+
+BindingSnapshot snapshot(const SwissTable<SymbolId, NodeId>& m) {
+    BindingSnapshot s;
+    m.for_each([&](SymbolId k, NodeId v) {
+        s.entries.push_back({k, v});
+    });
+    return s;
+}
+} // namespace
+
 Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
     switch (n.kind) {
         case ASTKind::LetStmt: {
@@ -94,14 +128,10 @@ Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
             if (s.init) {
                 auto r = lower_expr(*s.init);
                 if (!r.has_value()) return std::unexpected(r.error());
-                // Record the binding so subsequent Ident reads pick up the
-                // value's producer node id rather than synthesizing a
-                // Parameter placeholder.
-                bindings_[s.name] = *r;
+                bindings_.insert(s.name, *r);
             } else {
-                // Uninitialized `var` — produce a zero Constant placeholder.
                 NodeId zero = g_.make_constant_i64(0, kInvalidTypeId);
-                bindings_[s.name] = zero;
+                bindings_.insert(s.name, zero);
             }
             return true;
         }
@@ -140,49 +170,52 @@ Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
 
             // Lower then-branch.
             current_ctrl_ = true_proj;
-            // Snapshot bindings for the then-branch (we'll need them for
-            // phi-merging at the join).
-            auto bindings_before_then = bindings_;
+            BindingSnapshot bindings_before_then = snapshot(bindings_);
             auto then_blk = lower_stmt(*s.then_branch);
             if (!then_blk.has_value()) return std::unexpected(then_blk.error());
             NodeId ctrl_after_then = current_ctrl_;
             NodeId eff_after_then  = current_eff_;
-            auto bindings_after_then = bindings_;
+            BindingSnapshot bindings_after_then = snapshot(bindings_);
 
             // Lower else-branch (or fall through).
             current_ctrl_ = false_proj;
             current_eff_  = saved_eff;
-            bindings_ = bindings_before_then;
+            // Restore the pre-then bindings for the else branch.
+            bindings_.clear();
+            for (const auto& [sym, node] : bindings_before_then.entries) {
+                bindings_.insert(sym, node);
+            }
             if (s.else_branch) {
                 auto else_blk = lower_stmt(*s.else_branch);
                 if (!else_blk.has_value()) return std::unexpected(else_blk.error());
             }
             NodeId ctrl_after_else = current_ctrl_;
             NodeId eff_after_else  = current_eff_;
-            auto bindings_after_else = bindings_;
+            BindingSnapshot bindings_after_else = snapshot(bindings_);
 
             // Merge via Region.
             NodeId merge = g_.make_region({ctrl_after_then, ctrl_after_else});
             current_ctrl_ = merge;
-            // For the effect chain, prefer the then-branch's effect for
-            // simplicity (a real impl would emit a Phi for the effect too).
             current_eff_ = eff_after_then;
             (void)eff_after_else;
 
             // Merge let-bindings that were modified in either branch via
             // Phi nodes. For each binding that exists in both branches
             // with *different* NodeIds, emit a Phi at the merge region.
-            // For simplicity, we currently just take the then-branch's
-            // binding; full phi materialization comes with a real SSA
-            // construction pass.
-            for (const auto& [name, then_val] : bindings_after_then) {
-                auto it = bindings_after_else.find(name);
-                if (it != bindings_after_else.end() && it->second != then_val) {
-                    // Both branches assigned different values. Emit a Phi.
-                    NodeId phi = g_.make_phi(merge, {then_val, it->second}, kInvalidTypeId);
-                    bindings_[name] = phi;
+            for (const auto& [name, then_val] : bindings_after_then.entries) {
+                // Find the corresponding else-branch binding (if any).
+                const NodeId* else_p = nullptr;
+                for (const auto& [ename, enode] : bindings_after_else.entries) {
+                    if (ename == name) {
+                        else_p = &enode;
+                        break;
+                    }
+                }
+                if (else_p != nullptr && *else_p != then_val) {
+                    NodeId phi = g_.make_phi(merge, {then_val, *else_p}, kInvalidTypeId);
+                    bindings_.insert(name, phi);
                 } else {
-                    bindings_[name] = then_val;
+                    bindings_.insert(name, then_val);
                 }
             }
             return true;
@@ -197,40 +230,30 @@ Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
             return true;
         }
         case ASTKind::AssignExpr: {
-            // Expression-level assignment: target <- value. We support the
-            // simple `x = expr` case (where x is an Ident bound by `let`
-            // or `var`): update the binding's NodeId. Compound assignment
-            // (=, +=, etc.) is desugared into a BinaryExpr + assignment.
             const auto& a = static_cast<const ASTAssignExpr&>(n);
-            // Lower the value (right-hand side).
             auto val = lower_expr(*a.value);
             if (!val.has_value()) return std::unexpected(val.error());
-            // If target is an Ident, look up its binding and update it.
             if (a.target && a.target->kind == ASTKind::Ident) {
                 const auto& ident = static_cast<const ASTIdent&>(*a.target);
                 SymbolId name = ident.name;
                 if (a.op == TokenKind::Eq) {
-                    bindings_[name] = *val;
+                    bindings_.insert(name, *val);
                 } else {
-                    // Compound assignment (a += b -> a = a + b).
-                    // Look up current value, fold with new value via binop.
-                    auto cur = bindings_.find(name);
-                    NodeId lhs = (cur != bindings_.end()) ? cur->second
+                    const NodeId* cur = bindings_.get(name);
+                    NodeId lhs = (cur != nullptr) ? *cur
                         : g_.make_constant_i64(0, kInvalidTypeId);
                     NodeKind k = binop_to_node_kind(a.op);
-                    // For PlusEq -> Add, MinusEq -> Sub, etc.
                     if (a.op == TokenKind::PlusEq)   k = NodeKind::Add;
                     else if (a.op == TokenKind::MinusEq) k = NodeKind::Sub;
                     else if (a.op == TokenKind::StarEq)  k = NodeKind::Mul;
                     else if (a.op == TokenKind::SlashEq) k = NodeKind::Div;
                     NodeId folded = hc_.lookup_or_insert(k, {lhs, *val}, kInvalidTypeId, NodePayload{});
-                    bindings_[name] = folded;
+                    bindings_.insert(name, folded);
                 }
             }
             return true;
         }
         default:
-            // Treat as expr-shaped.
             auto r = lower_expr(n);
             return r.has_value();
     }
@@ -257,15 +280,9 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
         }
         case ASTKind::Ident: {
             const auto& i = static_cast<const ASTIdent&>(n);
-            // Look up the binding first; if it exists, return its NodeId.
-            // This is the key fix: `let c = a + b; return c;` will now
-            // return the Add node, not a fresh Parameter.
-            auto it = bindings_.find(i.name);
-            if (it != bindings_.end()) {
-                return it->second;
+            if (const NodeId* p = bindings_.get(i.name); p != nullptr) {
+                return *p;
             }
-            // Unknown identifier — synthesize a Parameter placeholder
-            // (the type checker would normally catch this as an error).
             NodePayload p; p.sym = i.name;
             return g_.make_node(NodeKind::Parameter, {}, kInvalidTypeId, p);
         }
@@ -287,7 +304,6 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
         }
         case ASTKind::CallExpr: {
             const auto& c = static_cast<const ASTCallExpr&>(n);
-            // Resolve callee SymbolId.
             SymbolId callee = kInvalidSymbolId;
             if (c.callee && c.callee->kind == ASTKind::PathExpr) {
                 const auto& p = static_cast<const ASTPathExpr&>(*c.callee);
@@ -296,7 +312,6 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
                 const auto& i = static_cast<const ASTIdent&>(*c.callee);
                 callee = i.name;
             }
-            // Lower arguments.
             std::vector<NodeId> args;
             args.reserve(c.args.size());
             for (const auto& a : c.args) {
@@ -305,11 +320,7 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
                 if (!r.has_value()) return std::unexpected(r.error());
                 args.push_back(*r);
             }
-            // Conservative: assume Altered unless we know better. A real
-            // impl looks up the callee's inferred effect from a function
-            // effect table built by EffectInference.
             EffectClass callee_eff = EffectClass::Altered;
-            // Emit the call.
             NodeId call = g_.make_call(current_ctrl_, current_eff_, callee,
                                        std::span<const NodeId>{args.data(), args.size()},
                                        kInvalidTypeId, callee_eff);
@@ -338,8 +349,6 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
             return last;
         }
         default:
-            // Unhandled expression: emit a placeholder Constant 0 so the
-            // graph remains valid.
             return g_.make_constant_i64(0, kInvalidTypeId);
     }
 }

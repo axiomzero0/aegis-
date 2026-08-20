@@ -4,12 +4,18 @@
 #include <charconv>
 #include <sstream>
 
+#include "aegis/support/Assert.hpp"
+
 namespace aegis {
 
 namespace {
 std::string fmt_payload(NodeKind k, NodePayload p) {
     std::ostringstream os;
+    // Law: Rule D.3 — switch is exhaustive on the closed enum. Default
+    // payload-less nodes print nothing; new NodeKinds MUST be added
+    // here or the build will fail.
     switch (k) {
+        // ---- Payload-bearing kinds ----
         case NodeKind::Constant:       os << " value=" << p.i64; break;
         case NodeKind::Parameter:      os << " sym=" << p.sym; break;
         case NodeKind::Proj:           os << " proj=" << p.proj_index; break;
@@ -20,7 +26,54 @@ std::string fmt_payload(NodeKind k, NodePayload p) {
         case NodeKind::Guard:
         case NodeKind::Deopt:
         case NodeKind::FrameState:     os << " fs=" << p.u64; break;
-        default: break;
+        // ---- Payload-less kinds (print nothing) ----
+        case NodeKind::Start:
+        case NodeKind::Region:
+        case NodeKind::Loop:
+        case NodeKind::If:
+        case NodeKind::Return:
+        case NodeKind::Branch:
+        case NodeKind::Stop:
+        case NodeKind::Phi:
+        case NodeKind::Add:
+        case NodeKind::Sub:
+        case NodeKind::Mul:
+        case NodeKind::Div:
+        case NodeKind::UDiv:
+        case NodeKind::Mod:
+        case NodeKind::UMod:
+        case NodeKind::And:
+        case NodeKind::Or:
+        case NodeKind::Xor:
+        case NodeKind::Shl:
+        case NodeKind::Shr:
+        case NodeKind::LShr:
+        case NodeKind::CmpEq:
+        case NodeKind::CmpNe:
+        case NodeKind::CmpLt:
+        case NodeKind::CmpLe:
+        case NodeKind::CmpGt:
+        case NodeKind::CmpGe:
+        case NodeKind::CmpUlt:
+        case NodeKind::CmpUle:
+        case NodeKind::CmpUgt:
+        case NodeKind::CmpUge:
+        case NodeKind::Neg:
+        case NodeKind::Not:
+        case NodeKind::Load:
+        case NodeKind::Store:
+        case NodeKind::Alloc:
+        case NodeKind::StackAlloc:
+        case NodeKind::GetElementPtr:
+        case NodeKind::Cast:
+        case NodeKind::Select:
+        case NodeKind::AtomicLoad:
+        case NodeKind::AtomicStore:
+        case NodeKind::AtomicRMW:
+        case NodeKind::Fence:
+        case NodeKind::ProfiledEntry:
+        case NodeKind::MachineOp:
+            break;
     }
     return os.str();
 }

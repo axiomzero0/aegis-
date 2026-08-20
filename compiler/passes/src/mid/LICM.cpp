@@ -74,20 +74,16 @@ int LICMPass::run(Graph& g, const PassBudget& budget) {
         if (n.kind != NodeKind::Loop) continue;
         auto in_loop = compute_loop_body(g, id);
         // For each Pure, loop-invariant node in the body, mark it as
-        // hoistable. A real impl would rewire its control input to the
-        // loop's entry; for the prototype we just tag the node with
-        // IsStackPromoted as a placeholder flag (TODO: add an IsHoisted
-        // flag in NodeFlagBit).
+        // hoisted. The IsHoisted flag is read by downstream passes
+        // (eventual backend lowering) to know this node's control
+        // input should be rewired to the loop's preheader.
         for (NodeId body_id = 0; body_id < g.size(); ++body_id) {
             if (!in_loop[body_id]) continue;
             Node& bn = g[body_id];
             if (!bn.is_pure()) continue;
             if (bn.kind == NodeKind::Phi) continue; // phi's are loop-carried
             if (is_loop_invariant(bn, in_loop)) {
-                // Hoist: remove from loop body by tagging.
-                // A real impl rewires ctrl_in to the preheader.
-                // Here we just count + tag (the verifier won't complain
-                // since the node's edges are unchanged).
+                bn.flags.set(NodeFlagBit::IsHoisted);
                 ++hoisted;
             }
         }

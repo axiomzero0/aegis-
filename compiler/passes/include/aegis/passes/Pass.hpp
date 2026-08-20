@@ -17,20 +17,24 @@
 #pragma once
 #include <string>
 #include "aegis/ir/Graph.hpp"
+#include "aegis/passes/PassConstants.hpp"
 
 namespace aegis {
 
 // Compile-time modes (Rule A.1: One Pipeline, Two Inputs).
 enum class CompileMode : uint8_t {
-    AOT,  // Static IR + default heuristics; passes 40-51 require proof.
-    JIT,  // Static IR + PGO data; passes 40-51 use guards.
+    AOT,  // Static IR + default heuristics; speculative passes require proof.
+    JIT,  // Static IR + PGO data; speculative passes use guards.
 };
 
 // Pass budget: the "Regulator" (Rule 47) decides whether a pass may
 // run, may grow the IR, may speculate, etc.
+//
+// Law: Rule 61 — every numeric default comes from PassConstants.hpp
+// (no magic numbers).
 struct PassBudget {
     uint32_t max_nodes_growth{0};  // 0 = pass must not grow the IR
-    uint32_t max_runtime_ms{100}; // soft cap; pass can yield if exceeded
+    uint32_t max_runtime_ms{passes::constants::kDefaultMaxRuntimeMs};
     bool     allow_speculation{false};
     bool     pgo_available{false};
     CompileMode mode{CompileMode::AOT};

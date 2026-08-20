@@ -17,8 +17,7 @@
 #include "aegis/passes/mid/CSE.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
-
-#include <unordered_map>
+#include "aegis/support/SwissTable.hpp"
 
 namespace aegis::passes::mid {
 
@@ -36,12 +35,14 @@ int CSEPass::run(Graph& g, const PassBudget& budget) {
 
     // Map from pointer NodeId -> last Load node id that read from it
     // (and no intervening Store on that pointer has happened).
-    std::unordered_map<NodeId, NodeId> last_load_per_ptr;
+    //
+    // Law: Rule D.4 — use SwissTable, not std::unordered_map. The map
+    // keys are NodeIds (uint32_t), so SwissTable's trivially-destructible
+    // requirement is satisfied.
+    SwissTable<NodeId, NodeId> last_load_per_ptr;
 
     NodeId cursor = current_eff;
     while (cursor != kInvalidNodeId) {
-        // Find the next effect in the chain (an output that is an
-        // Altered/Crowded node whose eff_in == cursor).
         NodeId next = kInvalidNodeId;
         for (NodeId user : g.outputs()[cursor].view()) {
             if (user >= g.size()) continue;
@@ -60,20 +61,17 @@ int CSEPass::run(Graph& g, const PassBudget& budget) {
             auto d = node.data_ins();
             NodeId ptr = d.empty() ? kInvalidNodeId : d[0];
             if (ptr == kInvalidNodeId) continue;
-            auto it = last_load_per_ptr.find(ptr);
-            if (it != last_load_per_ptr.end()) {
-                // Replace this Load with the previous one.
-                NodeId prev_load = it->second;
+            if (NodeId* prev_p = last_load_per_ptr.get(ptr); prev_p != nullptr) {
+                NodeId prev_load = *prev_p;
                 for (NodeId user : g.outputs()[cursor].view()) {
                     g.swap_input(user, cursor, prev_load);
                 }
                 g[cursor].flags.set(NodeFlagBit::IsDead);
                 ++removed;
             } else {
-                last_load_per_ptr[ptr] = cursor;
+                last_load_per_ptr.insert(ptr, cursor);
             }
         } else if (node.kind == NodeKind::Store) {
-            // A Store invalidates any cached Load on the same pointer.
             auto d = node.data_ins();
             NodeId ptr = d.empty() ? kInvalidNodeId : d[0];
             if (ptr != kInvalidNodeId) {

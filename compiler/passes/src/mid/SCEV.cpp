@@ -91,8 +91,8 @@ int SCEVAnalysis::run() noexcept {
                     break;
                 }
             }
-            map_[user] = expr;
-            map_[back] = expr;
+            map_.insert(user, expr);
+            map_.insert(back, expr);
             ++found;
         }
     }
@@ -100,15 +100,13 @@ int SCEVAnalysis::run() noexcept {
 }
 
 SCEVExpr SCEVAnalysis::scev_of(NodeId id) const noexcept {
-    auto it = map_.find(id);
-    if (it == map_.end()) return SCEVExpr{};
-    return it->second;
+    if (const SCEVExpr* p = map_.get(id); p != nullptr) return *p;
+    return SCEVExpr{};
 }
 
 int64_t SCEVAnalysis::trip_count_of(NodeId id) const noexcept {
-    auto it = map_.find(id);
-    if (it == map_.end()) return -1;
-    return it->second.trip_count;
+    if (const SCEVExpr* p = map_.get(id); p != nullptr) return p->trip_count;
+    return -1;
 }
 
 int SCEVPass::run(Graph& g, const PassBudget& budget) {

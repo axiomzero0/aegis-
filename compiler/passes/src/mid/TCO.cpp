@@ -53,8 +53,9 @@ int TailCallOptPass::run(Graph& g, const PassBudget& budget) {
         // The Return's ctrl + eff must be the call itself.
         if (ctrl != call) continue;
         if (eff  != call) continue;
-        // Tag as tail-call.
-        n.flags.set(NodeFlagBit::IsStackPromoted); // TODO: dedicated IsTailCall flag.
+        // Tag as tail-call. The backend lowers an IsTailCall-tagged
+        // Return to a direct `jmp` instead of `call+ret`.
+        n.flags.set(NodeFlagBit::IsTailCall);
         ++tagged;
     }
     (void)budget;

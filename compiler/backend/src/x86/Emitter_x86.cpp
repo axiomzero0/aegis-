@@ -95,7 +95,11 @@ void EmitterX8664::finalize(std::vector<uint8_t>& out_bytes) {
         shstrtab.append(s).append(1, '\0');
         return off;
     };
-    uint32_t shstr_null = add_str("");
+    // Section name strings are added to .shstrtab; the `add_str`
+    // call returns the offset that we'll write into each section
+    // header's sh_name field. The empty-string entry is reserved
+    // for the null section header (sh_name = 0).
+    (void)add_str("");
     uint32_t shstr_text = add_str(".text");
     uint32_t shstr_symtab = add_str(".symtab");
     uint32_t shstr_strtab = add_str(".strtab");
