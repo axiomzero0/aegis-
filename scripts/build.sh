@@ -89,12 +89,25 @@ PASSES=(
     passes/src/mid/DSE.cpp
     passes/src/mid/TCO.cpp
     passes/src/mid/SCEV.cpp
+    passes/src/mid/LoopUnrolling.cpp
+    passes/src/mid/LoopFusion.cpp
+    passes/src/mid/LoopFission.cpp
+    passes/src/mid/InductionVarSimplification.cpp
+    passes/src/mid/NullPointerElimination.cpp
+    passes/src/mid/RCOptimization.cpp
 )
 BACKEND=(
     backend/src/RegAlloc/LinearScan.cpp
+    backend/src/RegAlloc/GraphColoring.cpp
     backend/src/x86/InstrSel_x86.cpp
     backend/src/x86/Target_x86.cpp
     backend/src/x86/Emitter_x86.cpp
+    backend/src/SSAConstruction.cpp
+    backend/src/Peephole.cpp
+    backend/src/FrameLayout.cpp
+    backend/src/InstrScheduling.cpp
+    backend/src/EHTables.cpp
+    backend/src/DebugInfo.cpp
 )
 JIT=(
     jit/src/JitEngine.cpp
@@ -159,10 +172,23 @@ HOT_SET=(
     "passes/src/mid/DSE.cpp"
     "passes/src/mid/TCO.cpp"
     "passes/src/mid/SCEV.cpp"
+    "passes/src/mid/LoopUnrolling.cpp"
+    "passes/src/mid/LoopFusion.cpp"
+    "passes/src/mid/LoopFission.cpp"
+    "passes/src/mid/InductionVarSimplification.cpp"
+    "passes/src/mid/NullPointerElimination.cpp"
+    "passes/src/mid/RCOptimization.cpp"
     "backend/src/RegAlloc/LinearScan.cpp"
+    "backend/src/RegAlloc/GraphColoring.cpp"
     "backend/src/x86/InstrSel_x86.cpp"
     "backend/src/x86/Target_x86.cpp"
     "backend/src/x86/Emitter_x86.cpp"
+    "backend/src/SSAConstruction.cpp"
+    "backend/src/Peephole.cpp"
+    "backend/src/FrameLayout.cpp"
+    "backend/src/InstrScheduling.cpp"
+    "backend/src/EHTables.cpp"
+    "backend/src/DebugInfo.cpp"
     "jit/src/JitEngine.cpp"
     "jit/src/Deopt.cpp"
     "jit/src/MemManager.cpp"

@@ -119,6 +119,82 @@ constexpr uint32_t kTcoMaxTailCallArgs{16};
 /// in the trip_count subtraction (n - start).
 constexpr int64_t kScevMaxTripCount{1LL << 40};
 
+// ---- Loop Unrolling ----
+
+/// Default unroll factor for loops with a known trip count. 4 is the
+/// common x86-64 sweet spot — small enough to keep code-size growth
+/// bounded, large enough to expose ILP for the backend scheduler.
+/// Tunable via PGO.
+constexpr uint32_t kLoopUnrollDefaultFactor{4};
+
+/// Maximum IR node count growth allowed by Loop Unrolling per function.
+/// Rule B.6: passes that grow the IR must run inside a guarded
+/// budget. This is the budget.
+constexpr uint32_t kLoopUnrollMaxNodeGrowth{4096};
+
+/// Maximum trip count for full unrolling. Loops with trip_count <=
+/// this are fully unrolled (no remainder loop).
+constexpr uint32_t kLoopUnrollFullUnrollTripCount{8};
+
+// ---- Loop Fusion ----
+
+/// Maximum number of adjacent loops that Loop Fusion will merge in
+/// one pass. Larger values risk O(n^2) alias-analysis work.
+constexpr uint32_t kLoopFusionMaxAdjacent{4};
+
+// ---- Loop Fission ----
+
+/// Maximum number of statements per split slice when Loop Fission
+/// divides a large loop. Larger slices = fewer loops but worse I-cache.
+constexpr uint32_t kLoopFissionMaxSliceSize{16};
+
+// ---- Induction Variable Simplification ----
+
+/// Maximum number of induction variables in a single loop that IVS
+/// will rewrite. Beyond this the loop is considered too complex.
+constexpr uint32_t kIVSMaxInductionVarsPerLoop{8};
+
+// ---- Null Pointer Elimination ----
+
+/// Maximum number of null-check sites to process per function. Beyond
+/// this we skip — the function is too large to analyze profitably.
+constexpr uint32_t kNullPtrElimMaxCheckSites{1024};
+
+// ---- Reference Counting (RC) Optimization ----
+
+/// Maximum number of RC ops (inc/dec) per function that RC optimization
+/// will process. Beyond this we skip — RC optimization is O(n^2) in
+/// the worst case.
+constexpr uint32_t kRcOptMaxOpsPerFunction{4096};
+
+// ---- Partial Escape Analysis (PEA) ----
+
+/// Maximum number of alloc nodes that PEA will track per function.
+/// PEA is stateful (it maintains per-allocation state across basic
+/// blocks); the bound prevents pathological memory use.
+constexpr uint32_t kPeaMaxTrackedAllocs{256};
+
+// ---- Backend lowering ----
+
+/// Maximum number of vregs before Graph Coloring regalloc falls back
+/// to Linear Scan (Rule 47 cost model — graph coloring is O(n^2) in
+/// the worst case).
+constexpr uint32_t kGraphColoringMaxVregs{4096};
+
+/// Maximum number of peephole patterns to apply per function.
+constexpr uint32_t kPeepholeMaxPatterns{64};
+
+/// Maximum number of instructions to schedule per basic block.
+constexpr uint32_t kInstrSchedulingMaxPerBlock{256};
+
+/// Maximum stack slot reuse distance (in instructions) for Stack Slot
+/// Coloring.
+constexpr uint32_t kStackSlotColoringMaxReuseDistance{1024};
+
+/// Spill ratio threshold: if the spilled-vreg ratio exceeds this,
+/// the regalloc emits a RegAllocSpillOverflow telemetry event.
+constexpr uint32_t kRegAllocSpillOverflowPercent{25};
+
 // ---- Verifier (Rule 42) ----
 
 /// Maximum number of inputs a single node may have. Sanity bound to

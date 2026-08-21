@@ -68,6 +68,12 @@ PASSES_SRC=(
     "$ROOT/compiler/passes/src/mid/DSE.cpp"
     "$ROOT/compiler/passes/src/mid/TCO.cpp"
     "$ROOT/compiler/passes/src/mid/SCEV.cpp"
+    "$ROOT/compiler/passes/src/mid/LoopUnrolling.cpp"
+    "$ROOT/compiler/passes/src/mid/LoopFusion.cpp"
+    "$ROOT/compiler/passes/src/mid/LoopFission.cpp"
+    "$ROOT/compiler/passes/src/mid/InductionVarSimplification.cpp"
+    "$ROOT/compiler/passes/src/mid/NullPointerElimination.cpp"
+    "$ROOT/compiler/passes/src/mid/RCOptimization.cpp"
 )
 BACKEND_SRC=(
     "$ROOT/compiler/backend/src/RegAlloc/LinearScan.cpp"
