@@ -106,3 +106,4 @@ build_test test_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${
 build_test test_frontend_smoke "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${FRONTEND_SRC[@]}"
 build_test test_new_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
 build_test test_telemetry "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
+build_test test_sound_rewrites "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"

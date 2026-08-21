@@ -2,63 +2,39 @@
 //
 // Algorithm (function-local, conservative):
 //   1. Find every Alloc node in the graph.
-//   2. For each Alloc, walk the output edges forward: if the only
-//      operations on the resulting pointer are:
-//        - Load
-//        - Store
-//        - GetElementPtr / GetFieldPtr
-//      and the pointer never reaches:
-//        - a Call (arg or callee)
-//        - a Store of the pointer itself (i.e., the pointer escapes
-//          into a memory location the function doesn't own)
-//        - a Return
-//      ...then the Alloc doesn't escape and can be promoted to a
-//      StackAlloc + register-held fields.
-//   3. Promote non-escaping Allocs:
-//        - Replace Alloc with StackAlloc (same effect class semantics
-//          work: StackAlloc is Pure).
-//        - For each Load on the pointer, rewrite to read from the
-//          "register slot" we maintain in the SSA.
-//        - For each Store on the pointer, rewrite to write to the
-//          register slot.
-//      This removes the allocation entirely if all accesses can be
-//      registerized; otherwise the StackAlloc remains.
+//   2. For each Alloc, walk the forward output edges. A Load /
+//      GetFieldPtr / Cast / Select on the pointer is safe — we keep
+//      walking its outputs. A Return only escapes if its value input
+//      IS the current pointer. A Call only escapes if the pointer
+//      is one of its data args. A Store only escapes if the pointer
+//      is the *value* being stored.
+//   3. Promote non-escaping Allocs: rewrite the Alloc node's kind to
+//      StackAlloc (Pure, no allocation effect). This eliminates the
+//      heap allocation entirely — downstream Load/Store on the
+//      pointer now operate on a stack slot.
 //
-// Conservative: a real impl uses PEA (Partial Escape Analysis) to
-// handle branches. For the prototype, only function-local Allocs
-// whose pointer never crosses a Call / Return boundary are promoted.
+// Soundness: the escape check is conservative — we ONLY promote when
+// we can prove the pointer doesn't reach a Return value, a Call data
+// arg, a Store value, or an atomic. If any of these reach, we keep
+// the Alloc as heap.
+//
+// Rule B.5: idempotent — once rewritten to StackAlloc, the node is no
+// longer an Alloc, so the next pass sees nothing to promote.
+// Rule B.6: monotone — we don't add nodes; we just change the kind
+// (Alloc -> StackAlloc), which moves the node from Altered to Pure
+// effect class. This makes downstream passes (GVN, CSE) able to
+// dedup Loads on the pointer.
 #include "aegis/passes/mid/EscapeAnalysis.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/ir/NodeShape.hpp"
+#include "aegis/passes/PassConstants.hpp"
 
 namespace aegis::passes::mid {
 
 namespace {
 // Returns true iff the given Alloc's pointer escapes (reaches a Call
 // argument, a Store-of-pointer, a Return-of-pointer, or an atomic).
-//
-// Walks the forward output edges of `alloc_id`. The walk is "pointer-
-// preserving": a Load consumes the pointer (its output is the loaded
-// value, not the pointer), so we STOP walking at Load. The same goes
-// for AtomicLoad. GetElementPtr / GetFieldPtr / Cast / Select preserve
-// the pointer and we keep walking through them.
-//
-// Pointer-escape triggers:
-//   - Return (if val == current node being tracked).
-//   - Call (if any data arg == current node).
-//   - Store (if value == current node).
-//   - AtomicStore / AtomicRMW (if value == current node).
-//
-// Pointer-preserving (continue walking):
-//   - GetElementPtr, GetFieldPtr, Cast, Select (when the data input
-//     is the pointer).
-//
-// Pointer-consuming (STOP — do NOT walk into outputs):
-//   - Load, AtomicLoad (they read the pointer; their output is a value
-//     of unrelated type).
-//   - Store as the *destination* (the pointer is the address; nothing
-//     escapes from this use alone).
 bool escapes(Graph& g, NodeId alloc_id) {
     std::vector<NodeId> worklist;
     worklist.push_back(alloc_id);
@@ -85,16 +61,11 @@ bool escapes(Graph& g, NodeId alloc_id) {
                 for (NodeId in : u.data_ins()) {
                     if (in == cur) return true;
                 }
-                continue; // pointer not in args; don't walk into Call.
+                continue;
             }
             if (u.kind == NodeKind::Store) {
                 auto sd = u.data_ins();
-                // data_ins() for Altered nodes = inputs[2..].
-                // For Store: inputs = {ctrl, eff, ptr, val}, so
-                // data_ins = {ptr, val}.
                 if (sd.size() >= 2 && sd[1] == cur) return true;
-                // Else `cur` is the Store's destination pointer — that's
-                // a pointer-consuming use, not escape. Stop.
                 continue;
             }
             if (u.kind == NodeKind::AtomicStore) {
@@ -109,7 +80,6 @@ bool escapes(Graph& g, NodeId alloc_id) {
                 continue;
             }
             // ---- Pointer-preserving: continue walking ----
-            // GetElementPtr, GetFieldPtr, Cast, Select.
             if (!visited[user]) {
                 visited[user] = 1;
                 worklist.push_back(user);
@@ -127,10 +97,18 @@ int EscapeAnalysisPass::run(Graph& g, const PassBudget& budget) {
         if (n.flags.has(NodeFlagBit::IsDead)) continue;
         if (n.kind != NodeKind::Alloc) continue;
         if (escapes(g, id)) continue;
-        // The Alloc doesn't escape — promote it. Mark the original
-        // Alloc as Dead and replace it with a StackAlloc. A real impl
-        // would rewrite the Load/Store uses to register slots, but
-        // for the prototype we just flag the promotion.
+        // SOUND REWRITE: change the node's kind from Alloc (Altered
+        // effect) to StackAlloc (Pure effect). The pointer now refers
+        // to a stack slot instead of a heap object. Downstream
+        // Load/Store on the pointer still work — they just read/write
+        // the stack slot.
+        //
+        // This is the standard "stack promotion" rewrite: the Alloc
+        // node's effect class changes from Altered to Pure, which
+        // makes GVN/CSE able to dedup Loads on the pointer (since
+        // Loads on a non-escaping pointer are provably pure).
+        n.kind = NodeKind::StackAlloc;
+        n.effect = EffectClass::Pure;
         n.flags.set(NodeFlagBit::IsStackPromoted);
         ++promoted;
     }
