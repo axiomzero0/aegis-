@@ -95,6 +95,18 @@ PASSES=(
     passes/src/mid/InductionVarSimplification.cpp
     passes/src/mid/NullPointerElimination.cpp
     passes/src/mid/RCOptimization.cpp
+    passes/src/research/CFLAliasAnalysis.cpp
+    passes/src/research/ValueFlowAnalysis.cpp
+    passes/src/research/PGDLO.cpp
+    passes/src/research/MemPoolSynthesis.cpp
+    passes/src/research/CacheObliviousLayout.cpp
+    passes/src/research/SLPVectorization.cpp
+    passes/src/research/AutoParallelization.cpp
+    passes/src/research/SpeculativeLockElision.cpp
+    passes/src/research/GuardedDevirtualization.cpp
+    passes/src/research/SpeculativeEffectReordering.cpp
+    passes/src/research/SpeculativeBCE.cpp
+    passes/src/research/BOLTLayout.cpp
 )
 BACKEND=(
     backend/src/RegAlloc/LinearScan.cpp
@@ -178,6 +190,18 @@ HOT_SET=(
     "passes/src/mid/InductionVarSimplification.cpp"
     "passes/src/mid/NullPointerElimination.cpp"
     "passes/src/mid/RCOptimization.cpp"
+    "passes/src/research/CFLAliasAnalysis.cpp"
+    "passes/src/research/ValueFlowAnalysis.cpp"
+    "passes/src/research/PGDLO.cpp"
+    "passes/src/research/MemPoolSynthesis.cpp"
+    "passes/src/research/CacheObliviousLayout.cpp"
+    "passes/src/research/SLPVectorization.cpp"
+    "passes/src/research/AutoParallelization.cpp"
+    "passes/src/research/SpeculativeLockElision.cpp"
+    "passes/src/research/GuardedDevirtualization.cpp"
+    "passes/src/research/SpeculativeEffectReordering.cpp"
+    "passes/src/research/SpeculativeBCE.cpp"
+    "passes/src/research/BOLTLayout.cpp"
     "backend/src/RegAlloc/LinearScan.cpp"
     "backend/src/RegAlloc/GraphColoring.cpp"
     "backend/src/x86/InstrSel_x86.cpp"

@@ -195,6 +195,50 @@ constexpr uint32_t kStackSlotColoringMaxReuseDistance{1024};
 /// the regalloc emits a RegAllocSpillOverflow telemetry event.
 constexpr uint32_t kRegAllocSpillOverflowPercent{25};
 
+// ---- Research passes ----
+
+/// CFL-Reachability Alias Analysis: maximum number of nodes the
+/// alias-reachability worklist will visit before bailing.
+constexpr uint32_t kCflAliasMaxWorklistNodes{10'000};
+
+/// PGO confidence threshold (in percent) for speculation. Below this,
+/// the JIT won't speculate (Rule 46 — No profile data without
+/// confidence).
+constexpr uint32_t kPgoConfidenceThresholdPercent{99};
+
+/// SLP vectorization: minimum number of independent Pure nodes that
+/// can be packed into a SIMD register for the pass to fire.
+constexpr uint32_t kSlpMinPackableNodes{4};
+
+/// SLP vectorization: maximum SIMD width (in bytes) we'll attempt to
+/// pack into. The Target interface reports the actual width.
+constexpr uint32_t kSlpMaxSimdWidthBytes{64};
+
+/// Speculative Lock Elision: maximum contention rate (percent) above
+/// which we DO NOT elide the lock (fall back to mutex acquisition).
+constexpr uint32_t kSleMaxContentionPercent{5};
+
+/// BOLT-style layout: minimum function size (in machine instructions)
+/// for the layout pass to consider reordering.
+constexpr uint32_t kBoltMinFunctionSize{16};
+
+/// Cache-Oblivious Layout Synthesis: maximum container size (in
+/// elements) for the pass to attempt layout rewrites.
+constexpr uint32_t kCacheObliviousMaxContainerSize{65'536};
+
+/// Compile-Time Memory Pool Synthesis: minimum number of malloc/free
+/// pairs in a loop for the pass to synthesize a pool allocator.
+constexpr uint32_t kMemPoolSynthMinMallocPairs{4};
+
+/// Auto-Parallelization: minimum trip count for a loop to be a
+/// candidate for parallelization (below this, the fork/join overhead
+/// dominates).
+constexpr uint32_t kAutoParallelMinTripCount{1024};
+
+/// Guarded Devirtualization: minimum call-site count for a callee to
+/// be considered monomorphic (one dominant callee).
+constexpr uint32_t kGuardedDevirtMinCalls{4};
+
 // ---- Verifier (Rule 42) ----
 
 /// Maximum number of inputs a single node may have. Sanity bound to
