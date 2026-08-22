@@ -40,25 +40,51 @@ struct LatticeVal {
     }
 };
 
-int64_t apply_binop(NodeKind k, int64_t a, int64_t b) noexcept {
+// Fold a binary op over two known constants. Returns nullopt for
+// kinds that are not binary foldable — folding those to any value
+// would be a silent wrong answer (Rule D.3).
+std::optional<int64_t> apply_binop(NodeKind k, int64_t a, int64_t b) noexcept {
     switch (k) {
         case NodeKind::Add:  return a + b;
         case NodeKind::Sub:  return a - b;
         case NodeKind::Mul:  return a * b;
-        case NodeKind::Div:  return b != 0 ? a / b : 0;
-        case NodeKind::Mod:  return b != 0 ? a % b : 0;
+        case NodeKind::Div:  return b != 0 ? std::optional<int64_t>{a / b} : std::nullopt;
+        case NodeKind::Mod:  return b != 0 ? std::optional<int64_t>{a % b} : std::nullopt;
+        case NodeKind::UDiv: return b != 0 ? std::optional<int64_t>{static_cast<int64_t>(
+                                     static_cast<uint64_t>(a) / static_cast<uint64_t>(b))}
+                                   : std::nullopt;
+        case NodeKind::UMod: return b != 0 ? std::optional<int64_t>{static_cast<int64_t>(
+                                     static_cast<uint64_t>(a) % static_cast<uint64_t>(b))}
+                                   : std::nullopt;
         case NodeKind::And:  return a & b;
         case NodeKind::Or:   return a | b;
         case NodeKind::Xor:  return a ^ b;
         case NodeKind::Shl:  return a << b;
         case NodeKind::Shr:  return a >> b;
+        case NodeKind::LShr: return static_cast<int64_t>(
+                                     static_cast<uint64_t>(a) >> static_cast<uint64_t>(b));
         case NodeKind::CmpEq: return a == b ? 1 : 0;
         case NodeKind::CmpNe: return a != b ? 1 : 0;
         case NodeKind::CmpLt: return a <  b ? 1 : 0;
         case NodeKind::CmpLe: return a <= b ? 1 : 0;
         case NodeKind::CmpGt: return a >  b ? 1 : 0;
         case NodeKind::CmpGe: return a >= b ? 1 : 0;
-        default: return 0;
+        case NodeKind::CmpUlt: return static_cast<uint64_t>(a) <  static_cast<uint64_t>(b) ? 1 : 0;
+        case NodeKind::CmpUle: return static_cast<uint64_t>(a) <= static_cast<uint64_t>(b) ? 1 : 0;
+        case NodeKind::CmpUgt: return static_cast<uint64_t>(a) >  static_cast<uint64_t>(b) ? 1 : 0;
+        case NodeKind::CmpUge: return static_cast<uint64_t>(a) >= static_cast<uint64_t>(b) ? 1 : 0;
+        default: return std::nullopt;
+    }
+}
+
+// Fold a unary op over one known constant. Returns nullopt for kinds
+// that are not unary foldable.
+std::optional<int64_t> apply_unop(NodeKind k, int64_t a) noexcept {
+    switch (k) {
+        case NodeKind::Neg:    return -a;
+        case NodeKind::Not:    return a == 0 ? 1 : 0; // logical not (!x)
+        case NodeKind::BitNot: return ~a;             // bitwise not (~x)
+        default: return std::nullopt;
     }
 }
 } // namespace
@@ -86,32 +112,81 @@ int SCCPPass::run(Graph& g, const PassBudget& budget) {
             const Node& nd = g[id];
             if (nd.flags.has(NodeFlagBit::IsDead)) continue;
             if (nd.kind == NodeKind::Constant) continue; // already set
-            // Compute the new lattice value from inputs.
-            LatticeVal new_v;
-            // If any data input is Bottom -> this node becomes Bottom.
-            bool any_bottom = false;
-            bool all_const  = true;
-            int64_t accumulator = 0;
-            bool first = true;
-            for (NodeId in : nd.data_ins()) {
-                if (in == kInvalidNodeId) continue;
-                if (in >= n) continue;
-                const LatticeVal& v = state[in];
-                if (v.is_top()) { all_const = false; continue; }
-                if (v.is_bottom()) { any_bottom = true; break; }
-                if (first) { accumulator = v.value; first = false; }
-                else {
-                    accumulator = apply_binop(nd.kind, accumulator, v.value);
+            // Phi: meet over all inputs. It folds to a constant ONLY
+            // when every reachable input agrees on the same value —
+            // two DIFFERENT constants meet to Bottom (the branch
+            // decides at runtime). (Pre-fix this folded Phi(5, 9) to
+            // 0 via the binop default: a silent wrong answer.)
+            if (nd.kind == NodeKind::Phi) {
+                LatticeVal meet;
+                bool have_any = false;
+                bool phi_bottom = false;
+                for (NodeId in : nd.data_ins()) {
+                    if (in == kInvalidNodeId || in >= n) continue;
+                    const LatticeVal& v = state[in];
+                    if (v.is_bottom()) { phi_bottom = true; break; }
+                    if (v.is_top()) continue; // unreachable edge so far
+                    LatticeVal next = meet;
+                    if (have_any) next.merge(v); else { next = v; have_any = true; }
+                    meet = next;
                 }
+                if (phi_bottom) {
+                    if (state[id].merge(LatticeVal::bottom())) changed = true;
+                } else if (have_any && state[id].merge(meet)) {
+                    changed = true;
+                }
+                continue;
             }
-            if (any_bottom) {
-                new_v = LatticeVal::bottom();
-            } else if (all_const && !first) {
-                new_v = LatticeVal::constant(accumulator);
-            } else {
-                continue; // can't determine yet
+            // Unary ops: Neg / Not / BitNot. (Pre-fix these folded to
+            // the operand unchanged — the negation/not was dropped.)
+            if (nd.kind == NodeKind::Neg || nd.kind == NodeKind::Not ||
+                nd.kind == NodeKind::BitNot) {
+                NodeId in0 = nd.data_ins().empty()
+                    ? kInvalidNodeId : nd.data_ins()[0];
+                if (in0 == kInvalidNodeId || in0 >= n) continue;
+                const LatticeVal& v = state[in0];
+                if (v.is_bottom()) {
+                    if (state[id].merge(LatticeVal::bottom())) changed = true;
+                    continue;
+                }
+                if (v.is_top()) continue;
+                std::optional<int64_t> folded = apply_unop(nd.kind, v.value);
+                if (folded && state[id].merge(LatticeVal::constant(*folded))) {
+                    changed = true;
+                }
+                continue;
             }
-            if (state[id].merge(new_v)) changed = true;
+            // Binary ops: fold only when BOTH inputs are the same
+            // known constant and the op is foldable.
+            {
+                LatticeVal new_v;
+                bool any_bottom = false;
+                bool all_const  = true;
+                int64_t accumulator = 0;
+                bool first = true;
+                for (NodeId in : nd.data_ins()) {
+                    if (in == kInvalidNodeId) continue;
+                    if (in >= n) continue;
+                    const LatticeVal& v = state[in];
+                    if (v.is_top()) { all_const = false; continue; }
+                    if (v.is_bottom()) { any_bottom = true; break; }
+                    if (first) { accumulator = v.value; first = false; }
+                    else {
+                        std::optional<int64_t> folded =
+                            apply_binop(nd.kind, accumulator, v.value);
+                        if (!folded) { all_const = false; break; }
+                        accumulator = *folded;
+                    }
+                }
+                if (any_bottom) {
+                    new_v = LatticeVal::bottom();
+                } else if (all_const && !first) {
+                    new_v = LatticeVal::constant(accumulator);
+                } else {
+                    continue; // can't determine yet
+                }
+                if (state[id].merge(new_v)) changed = true;
+            }
         }
     }
 
@@ -119,19 +194,29 @@ int SCCPPass::run(Graph& g, const PassBudget& budget) {
     // a reference to the original Constant node (or mark for GVN).
     int removed = 0;
     for (NodeId id = 0; id < n; ++id) {
-        Node& nd = g[id];
-        if (nd.flags.has(NodeFlagBit::IsDead)) continue;
-        if (nd.kind == NodeKind::Constant) continue;
-        if (!nd.is_pure()) continue;
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g[id].kind == NodeKind::Constant) continue;
+        if (!g[id].is_pure()) continue;
         // If this node folded to a constant, replace it with a fresh
         // Constant node. The next GVN pass will dedup it.
         if (state[id].is_const()) {
-            NodeId new_const = g.make_constant_i64(state[id].value, nd.type_id);
-            // Rewire downstream uses.
-            for (NodeId user : g.outputs()[id].view()) {
+            // Rule 73: capture the type by value BEFORE make_constant
+            // appends to the node vector — a Node& held across the
+            // append dangles after reallocation, and writing through
+            // it corrupts unrelated heap memory (the pre-fix defect
+            // the Rule 42 verifier surfaced as bogus use-def edges).
+            TypeId folded_ty = g[id].type_id;
+            NodeId new_const = g.make_constant_i64(state[id].value, folded_ty);
+            // Rewire downstream uses. SNAPSHOT first: swap_input
+            // removes `user` from this very output list, and iterating
+            // the live view while mutating it corrupts the use-def map
+            // (caught by the Rule 42 verifier as a use-def mismatch).
+            for (NodeId user : g.users_snapshot(id)) {
                 g.swap_input(user, id, new_const);
             }
-            nd.flags.set(NodeFlagBit::IsDead);
+            // Re-fetch by id: make_constant may have reallocated the
+            // node vector (Rule 73).
+            g[id].flags.set(NodeFlagBit::IsDead);
             ++removed;
         }
     }

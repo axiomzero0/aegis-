@@ -4,10 +4,13 @@
 //   For each CallCrowded node (mutex acquire/release), when PGO shows
 //   low contention (< kSleMaxContentionPercent), we:
 //     1. Create a FrameState node capturing the current state.
-//     2. Tag the Call with IsPgoSpeculated + HasFrameState +
-//        IsGuarded (so the backend knows to inline the critical
-//        section + guard it with an atomic version counter, with
-//        deopt to the standard lock path on contention).
+//     2. Attach the FrameState as an INPUT EDGE (append_input) and tag
+//        the Call with IsPgoSpeculated + HasFrameState + IsGuarded (so
+//        the backend knows to inline the critical section + guard it
+//        with an atomic version counter, with deopt to the standard
+//        lock path on contention). The callee SymbolId in the payload
+//        is NOT touched — clobbering payload.u64 would silently
+//        redirect the call to a bogus symbol (Rule 62).
 //     3. Emit telemetry on the speculation decision.
 //
 //   The actual lock elision (inlining the critical section + emitting
@@ -41,14 +44,19 @@ int SpeculativeLockElisionPass::run(Graph& g, const PassBudget& budget) {
     for (NodeId id = 0; id < g.size(); ++id) {
         if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
         if (g[id].kind != NodeKind::CallCrowded) continue;
+        // Rule B.5 (idempotency): already-elided calls keep their
+        // original FrameState; re-speculating would duplicate it on
+        // every fixpoint iteration.
+        if (g[id].flags.has(NodeFlagBit::IsPgoSpeculated)) continue;
         // SOUND: capture ctrl_in/eff_in by value BEFORE calling
         // make_frame_state (which may reallocate the node vector,
         // invalidating any Node& reference).
         NodeId ctrl_in = g[id].ctrl_in();
         NodeId eff_in  = g[id].eff_in();
         NodeId fs = g.make_frame_state({ctrl_in, eff_in});
-        // Re-fetch by id AFTER the potential reallocation.
-        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        // Attach the FrameState as an input edge; the callee SymbolId
+        // in the payload stays intact (Rule 62).
+        g.append_input(id, fs);
         g[id].flags.set(NodeFlagBit::IsPgoSpeculated |
                         NodeFlagBit::HasFrameState |
                         NodeFlagBit::IsGuarded);

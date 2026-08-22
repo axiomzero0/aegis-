@@ -63,7 +63,8 @@ int CSEPass::run(Graph& g, const PassBudget& budget) {
             if (ptr == kInvalidNodeId) continue;
             if (NodeId* prev_p = last_load_per_ptr.get(ptr); prev_p != nullptr) {
                 NodeId prev_load = *prev_p;
-                for (NodeId user : g.outputs()[cursor].view()) {
+                // Snapshot: swap_input mutates this output list.
+                for (NodeId user : g.users_snapshot(cursor)) {
                     g.swap_input(user, cursor, prev_load);
                 }
                 g[cursor].flags.set(NodeFlagBit::IsDead);

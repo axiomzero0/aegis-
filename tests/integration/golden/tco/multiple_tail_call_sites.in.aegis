@@ -1,0 +1,15 @@
+fn g(v: i32) -> i32 {
+    return v + 1;
+}
+fn f(v: i32) -> i32 {
+    if v > 3 {
+        return g(v);
+    }
+    if v > 1 {
+        return g(v);
+    }
+    return g(0);
+}
+fn main() -> i32 {
+    return f(7);
+}

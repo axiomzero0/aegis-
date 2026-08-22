@@ -49,12 +49,6 @@ constexpr uint32_t kFixpointBudgetPerPass{5};
 /// not required to. Tuned to keep total compile time reasonable.
 constexpr uint32_t kDefaultMaxRuntimeMs{100};
 
-/// Mask for the low 31 bits of an immediate value. Used by the
-/// instruction selector to encode immediate values into VRegId-sized
-/// slots (uint32_t). The full value is recovered by sign-extension at
-/// emit time.
-constexpr uint64_t kImmediateMaskLow31Bits{0x7FFFFFFFULL};
-
 // ---- SCCP ----
 
 /// Maximum number of SCCP worklist iterations before bailing. SCCP is
@@ -200,6 +194,31 @@ constexpr uint32_t kRegAllocSpillOverflowPercent{25};
 /// CFL-Reachability Alias Analysis: maximum number of nodes the
 /// alias-reachability worklist will visit before bailing.
 constexpr uint32_t kCflAliasMaxWorklistNodes{10'000};
+
+/// CFL-Reachability Alias Analysis: fixpoint iteration cap. The
+/// abstract-location transfer functions converge quickly on real
+/// graphs; this bound guards against pathological non-convergence
+/// (Rule B.5/B.6 — bounded work, loud telemetry on cap hit).
+constexpr uint32_t kCflAliasMaxFixpointIterations{10};
+
+/// Value Flow Analysis: fixpoint iteration cap for the flowing
+/// value-set propagation. Same rationale as
+/// kCflAliasMaxFixpointIterations.
+constexpr uint32_t kValueFlowMaxFixpointIterations{10};
+
+/// SLP vectorization: inline capacity of the per-group member list.
+/// Groups rarely exceed 4 members (one SIMD pack); the SmallVector
+/// SBO (Rule 57) avoids a heap allocation in the common case.
+constexpr uint32_t kSlpGroupInlineCapacity{4};
+
+/// SLP vectorization: inline capacity of the group collection itself.
+/// Functions rarely contain more than 8 distinct (kind, type) groups.
+constexpr uint32_t kSlpGroupsInlineCapacity{8};
+
+/// LICM: byte size of the stack buffer used to format the telemetry
+/// detail string ("loops=N reason=..."). Sized to fit the longest
+/// expected message; snprintf truncates safely beyond it.
+constexpr uint32_t kLicmTelemetryDetailBytes{64};
 
 /// PGO confidence threshold (in percent) for speculation. Below this,
 /// the JIT won't speculate (Rule 46 — No profile data without

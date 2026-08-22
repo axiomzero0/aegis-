@@ -1,0 +1,9 @@
+fn f(x: i32) -> i32 {
+    var t = x;
+    t += 3;
+    t -= 1;
+    return t;
+}
+fn main() -> i32 {
+    return f(15);
+}

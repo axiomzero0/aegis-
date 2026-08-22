@@ -44,8 +44,9 @@ bool independent(Graph& g, NodeId a, NodeId b) {
 
 int SLPVectorizationPass::run(Graph& g, const PassBudget& budget) {
     // Collect Pure binops grouped by (kind, type_id).
-    struct Group { NodeKind kind; TypeId ty; SmallVector<NodeId, 4> nodes; };
-    SmallVector<Group, 8> groups;
+    struct Group { NodeKind kind; TypeId ty;
+                   SmallVector<NodeId, constants::kSlpGroupInlineCapacity> nodes; };
+    SmallVector<Group, constants::kSlpGroupsInlineCapacity> groups;
     for (NodeId id = 0; id < g.size(); ++id) {
         const Node& n = g[id];
         if (n.flags.has(NodeFlagBit::IsDead)) continue;

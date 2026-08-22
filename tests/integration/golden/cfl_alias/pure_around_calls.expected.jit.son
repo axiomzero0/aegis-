@@ -1,0 +1,31 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Constant (Pure) value=1 ins=[]
+n5 : Add (Pure) ins=[3,4]
+n6 : Return (Pure) ins=[1,2,5]
+n7 : Proj (Pure) proj=0 ins=[0] DEAD
+n8 : Proj (Pure) proj=1 ins=[0] DEAD
+n9 : Parameter (Pure) sym=6 ins=[]
+n10 : Constant (Pure) value=2 ins=[] DEAD
+n11 : Mul (Pure) ins=[9,10] DEAD
+n12 : CallAltered (Altered) callee=sym2 ins=[1,2,25,28] +guarded +fs +pgo
+n13 : Proj (Pure) proj=0 ins=[12]
+n14 : Add (Pure) ins=[13,25]
+n15 : Return (Pure) ins=[1,12,14]
+n16 : Proj (Pure) proj=0 ins=[0] DEAD
+n17 : Proj (Pure) proj=1 ins=[0] DEAD
+n18 : Constant (Pure) value=4 ins=[]
+n19 : CallAltered (Altered) callee=sym5 ins=[1,2,18,29] +guarded +fs +pgo
+n20 : Proj (Pure) proj=0 ins=[19] DEAD
+n21 : Return (Pure) ins=[1,19,18]
+n22 : Proj (Pure) proj=1 ins=[0] DEAD
+n23 : Constant (Pure) value=4 ins=[] DEAD
+n24 : Constant (Pure) value=1 ins=[] DEAD
+n25 : Shl (Pure) ins=[9,4]
+n26 : Proj (Pure) proj=1 ins=[0] DEAD
+n27 : Proj (Pure) proj=1 ins=[0] DEAD
+n28 : FrameState (Pure) fs=0 ins=[1,2]
+n29 : FrameState (Pure) fs=0 ins=[1,2]

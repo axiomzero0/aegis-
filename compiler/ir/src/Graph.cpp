@@ -162,18 +162,23 @@ NodeId Graph::make_frame_state(std::initializer_list<NodeId> snapshot) {
 // ---------- Edge mutation ----------
 void Graph::swap_input(NodeId n, NodeId old_in, NodeId new_in) {
     Node& node = nodes_[n];
-    bool  found = false;
+    // Count how many input EDGES get replaced: the same operand can
+    // appear more than once (e.g. `a + a` lowers to Add with BOTH
+    // inputs pointing at the same node, and the output list carries
+    // ONE ENTRY PER EDGE). The bookkeeping below must stay balanced —
+    // pre-fix this unlinked a single entry regardless, leaving a
+    // stale user in the output list after multi-edge rewrites
+    // (surfaced by the Rule 42 verifier as a use-def mismatch).
+    uint32_t replaced = 0;
     for (NodeId& i : node.inputs) {
-        if (i == old_in) {
-            i = new_in;
-            found = true;
-        }
+        if (i == old_in) { i = new_in; ++replaced; }
     }
-    if (found) {
+    if (replaced == 0) return;
+    for (uint32_t r = 0; r < replaced; ++r) {
         unlink_input_from_output(n, old_in);
         link_input_to_output(n, new_in);
-        bump_version();
     }
+    bump_version();
 }
 void Graph::set_input(NodeId n, size_t i, NodeId new_in) {
     Node& node = nodes_[n];
@@ -182,6 +187,17 @@ void Graph::set_input(NodeId n, size_t i, NodeId new_in) {
     if (old == new_in) return;
     node.inputs[i] = new_in;
     unlink_input_from_output(n, old);
+    link_input_to_output(n, new_in);
+    bump_version();
+}
+void Graph::append_input(NodeId n, NodeId new_in) {
+    // Rule 73: validate the edge target before wiring it — a dangling
+    // NodeId here would corrupt the verifier's use-def walk.
+    if (new_in == kInvalidNodeId || new_in >= nodes_.size()) {
+        return;
+    }
+    Node& node = nodes_[n];
+    node.inputs.push_back(new_in);
     link_input_to_output(n, new_in);
     bump_version();
 }

@@ -246,8 +246,12 @@ bool Lexer::tokenize(std::vector<Token>& out) {
                 break;
             case '&':
                 if (peek(1) == '&') { advance(2); k = TokenKind::AndAnd; }
-                else if (peek(1) == 'm' && peek(2) == 'u' && peek(3) == 't') { advance(4); k = TokenKind::RefMut; }
-                else { advance(); k = TokenKind::Ref; }
+                else { advance(); k = TokenKind::Amp; }
+                // NOTE: a future borrow syntax (`&expr`, `&mut expr`)
+                // will need distinct lexing (e.g. contextual keywords)
+                // — mapping single `&` to Ref made the documented
+                // bitwise-AND operator unreachable (root-cause fix per
+                // Rule 68; Ref/RefMut stay reserved in the enum).
                 break;
             case '|':
                 if (peek(1) == '|') { advance(2); k = TokenKind::OrOr; }

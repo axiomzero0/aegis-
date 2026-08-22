@@ -1,0 +1,7 @@
+fn f(x: i32) -> i32 {
+    let p = x + 7;
+    return p * p;
+}
+fn main() -> i32 {
+    return f(5);
+}

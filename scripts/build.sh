@@ -46,6 +46,11 @@ CXXFLAGS_HOT_PATH=(
     -DAEGIS_NO_EXCEPTIONS=1
 )
 
+export CXX
+# Arrays cannot be exported; pass the hot-path flags as a plain
+# (space-separated, no spaces inside flags) string instead.
+AEGIS_HOT_FLAGS_STR="${CXXFLAGS_HOT_PATH[*]}"
+export AEGIS_HOT_FLAGS_STR
 mkdir -p "$BUILD/obj"
 
 SUPPORT_HOT=(
@@ -97,6 +102,7 @@ PASSES=(
     passes/src/mid/RCOptimization.cpp
     passes/src/research/CFLAliasAnalysis.cpp
     passes/src/research/ValueFlowAnalysis.cpp
+    passes/src/research/ResearchPipeline.cpp
     passes/src/research/PGDLO.cpp
     passes/src/research/MemPoolSynthesis.cpp
     passes/src/research/CacheObliviousLayout.cpp
@@ -192,6 +198,7 @@ HOT_SET=(
     "passes/src/mid/RCOptimization.cpp"
     "passes/src/research/CFLAliasAnalysis.cpp"
     "passes/src/research/ValueFlowAnalysis.cpp"
+    "passes/src/research/ResearchPipeline.cpp"
     "passes/src/research/PGDLO.cpp"
     "passes/src/research/MemPoolSynthesis.cpp"
     "passes/src/research/CacheObliviousLayout.cpp"
@@ -229,7 +236,11 @@ is_hot() {
     return 1
 }
 
+# Compile in parallel (one job per core). Each job resolves its own
+# source path + flags; failures print the compiler diagnostic and
+# abort the build (set -e + pipefail below).
 OBJECTS=()
+JOB_LIST=()
 for src in "${ALL_SOURCES[@]}"; do
     obj="$BUILD/obj/$(echo "$src" | tr '/' '_').o"
     OBJECTS+=("$obj")
@@ -238,17 +249,28 @@ for src in "${ALL_SOURCES[@]}"; do
         SRC_PATH="$ROOT/$src"
     fi
     if [[ ! -f "$SRC_PATH" ]]; then
-        echo "skip missing source: $src"
-        continue
+        echo "FAIL: missing source: $src" >&2
+        exit 2
     fi
     if is_hot "$src"; then
-        FLAGS=("${CXXFLAGS_COMMON[@]}" "${CXXFLAGS_HOT_PATH[@]}")
+        HOT=1
     else
-        FLAGS=("${CXXFLAGS_COMMON[@]}")
+        HOT=0
     fi
-    echo "CXX  $src"
-    "$CXX" "${FLAGS[@]}" -c "$SRC_PATH" -o "$obj"
+    JOB_LIST+=("$obj|$SRC_PATH|$HOT|$src")
 done
+
+printf '%s\n' "${JOB_LIST[@]}" | xargs -P "$(nproc)" -I{} bash -c '
+    IFS="|" read -r obj src hot name <<< "{}"
+    echo "CXX  $name"
+    if [[ "$hot" == "1" ]]; then
+        # shellcheck disable=SC2206 # word-split the exported flag string
+        hot_flags=(${AEGIS_HOT_FLAGS_STR})
+        "$CXX" "${@}" "${hot_flags[@]}" -c "$src" -o "$obj"
+    else
+        "$CXX" "${@}" -c "$src" -o "$obj"
+    fi
+' _ "${CXXFLAGS_COMMON[@]}"
 
 echo "LINK aegisc"
 "$CXX" "${CXXFLAGS_COMMON[@]}" "${OBJECTS[@]}" "$ROOT/tools/aegisc/main.cpp" -o "$BUILD/aegisc"

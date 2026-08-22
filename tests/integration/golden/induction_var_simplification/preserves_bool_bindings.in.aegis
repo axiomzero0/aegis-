@@ -1,0 +1,8 @@
+fn f(x: i32) -> i32 {
+    let t = x > 1;
+    let u = x > 2;
+    return t + u;
+}
+fn main() -> i32 {
+    return f(18);
+}

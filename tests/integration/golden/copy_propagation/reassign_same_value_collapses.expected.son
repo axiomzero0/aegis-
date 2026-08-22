@@ -1,0 +1,16 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Return (Pure) ins=[1,2,3]
+n5 : Proj (Pure) proj=0 ins=[0] DEAD
+n6 : Proj (Pure) proj=1 ins=[0] DEAD
+n7 : Constant (Pure) value=8 ins=[]
+n8 : CallAltered (Altered) callee=sym2 ins=[1,2,7]
+n9 : Proj (Pure) proj=0 ins=[8] DEAD
+n10 : Return (Pure) ins=[1,8,7]
+n11 : Proj (Pure) proj=1 ins=[0] DEAD
+n12 : Constant (Pure) value=8 ins=[] DEAD
+n13 : Proj (Pure) proj=1 ins=[0] DEAD
+n14 : Proj (Pure) proj=1 ins=[0] DEAD

@@ -3,7 +3,7 @@
 // Emits a real ELF64 object file that you can link with `ld` / `gcc`.
 // The output contains:
 //   - ELF header (64 bytes)
-//   - Section header table (with 3 sections: null, .text, .symtab, .strtab, .shstrtab)
+//   - Section header table (with 5 sections: null, .text, .symtab, .strtab, .shstrtab)
 //   - .text section bytes
 //   - .symtab + .strtab (one symbol per emitted function)
 //   - .shstrtab (section name strings)
@@ -11,7 +11,13 @@
 // This is a real object file, not a stub. `readelf -h build/out.o` will
 // show the ELF header; `objdump -d build/out.o` will disassemble the
 // .text section.
+//
+// Law: Rule D.1/D.2 — every ELF ABI literal comes from
+// backend/ElfConstants.hpp as a named constant; the emitter reads
+// like the spec it implements.
 #include "aegis/backend/x86/Emitter_x86.hpp"
+
+#include "aegis/backend/ElfConstants.hpp"
 
 #include <cstring>
 
@@ -19,9 +25,11 @@ namespace aegis::backend::x86 {
 
 namespace {
 
+namespace elfc = aegis::backend::elf;
+
 #pragma pack(push, 1)
 struct Elf64_Ehdr {
-    uint8_t  e_ident[16];
+    uint8_t  e_ident[elfc::kIdentSize];
     uint16_t e_type;
     uint16_t e_machine;
     uint32_t e_version;
@@ -36,7 +44,10 @@ struct Elf64_Ehdr {
     uint16_t e_shnum;
     uint16_t e_shstrndx;
 };
-static_assert(sizeof(Elf64_Ehdr) == 64);
+// Rule 73: layout assumptions enforced by static_assert against the
+// named ABI constants (not bare literals).
+static_assert(sizeof(Elf64_Ehdr) == elfc::kEhdrSize);
+static_assert(offsetof(Elf64_Ehdr, e_shoff) == 0x28); // NOLINT(magic-numbers) ELF-64 spec: e_shoff lives at byte 40
 
 struct Elf64_Shdr {
     uint32_t sh_name;
@@ -50,7 +61,7 @@ struct Elf64_Shdr {
     uint64_t sh_addralign;
     uint64_t sh_entsize;
 };
-static_assert(sizeof(Elf64_Shdr) == 64);
+static_assert(sizeof(Elf64_Shdr) == elfc::kShdrSize);
 
 struct Elf64_Sym {
     uint32_t st_name;
@@ -60,17 +71,23 @@ struct Elf64_Sym {
     uint64_t st_value;
     uint64_t st_size;
 };
-static_assert(sizeof(Elf64_Sym) == 24);
+static_assert(sizeof(Elf64_Sym) == elfc::kSymSize);
 #pragma pack(pop)
 
+/// x86-64 opcode byte for `ret`.
+constexpr uint8_t kOpRet{0xc3};
+/// Bytes emitted per function in the prototype emitter (one `ret`).
+constexpr uint64_t kPrototypeFnTextBytes{1};
+
 void put_u32(std::vector<uint8_t>& v, uint32_t x) {
-    v.push_back(x & 0xff);
-    v.push_back((x >> 8) & 0xff);
-    v.push_back((x >> 16) & 0xff);
-    v.push_back((x >> 24) & 0xff);
+    for (uint32_t i = 0; i < elfc::kU32Bytes; ++i) {
+        v.push_back(static_cast<uint8_t>((x >> (i * elfc::kBitsPerByte)) & elfc::kByteMask));
+    }
 }
 void put_u64(std::vector<uint8_t>& v, uint64_t x) {
-    for (int i = 0; i < 8; ++i) v.push_back((x >> (i * 8)) & 0xff);
+    for (uint32_t i = 0; i < elfc::kU64Bytes; ++i) {
+        v.push_back(static_cast<uint8_t>((x >> (i * elfc::kBitsPerByte)) & elfc::kByteMask));
+    }
 }
 
 } // namespace
@@ -82,9 +99,9 @@ void EmitterX8664::emit_function(const MachineFunction& fn) {
     // proper x86-64 bytes.
     symbol_names_.push_back(fn.name);
     symbol_offsets_.push_back(static_cast<uint32_t>(text_bytes_.size()));
-    // For now: emit a single `ret` byte (0xc3) for each function so the
+    // For now: emit a single `ret` byte for each function so the
     // object file is valid even if no other bytes are produced.
-    text_bytes_.push_back(0xc3); // ret
+    text_bytes_.push_back(kOpRet);
 }
 
 void EmitterX8664::finalize(std::vector<uint8_t>& out_bytes) {
@@ -100,9 +117,9 @@ void EmitterX8664::finalize(std::vector<uint8_t>& out_bytes) {
     // header's sh_name field. The empty-string entry is reserved
     // for the null section header (sh_name = 0).
     (void)add_str("");
-    uint32_t shstr_text = add_str(".text");
-    uint32_t shstr_symtab = add_str(".symtab");
-    uint32_t shstr_strtab = add_str(".strtab");
+    uint32_t shstr_text     = add_str(".text");
+    uint32_t shstr_symtab   = add_str(".symtab");
+    uint32_t shstr_strtab   = add_str(".strtab");
     uint32_t shstr_shstrtab = add_str(".shstrtab");
 
     // Build symbol string table (.strtab).
@@ -127,38 +144,41 @@ void EmitterX8664::finalize(std::vector<uint8_t>& out_bytes) {
     // One entry per function.
     for (size_t i = 0; i < symbol_names_.size(); ++i) {
         put_u32(symtab_bytes, sym_name_offsets[i]);
-        symtab_bytes.push_back(0x11); // STB_GLOBAL << 4 | STT_FUNC
-        symtab_bytes.push_back(0);    // STV_DEFAULT
-        symtab_bytes.push_back(1); symtab_bytes.push_back(0); // .text section index
-        put_u64(symtab_bytes, symbol_offsets_[i]); // st_value
-        put_u64(symtab_bytes, 1);                  // st_size = 1 (ret) for prototype
+        // st_info = (STB_GLOBAL << 4) | STT_FUNC
+        symtab_bytes.push_back(
+            static_cast<uint8_t>((elfc::kStbGlobal << elfc::kStInfoBindShift) | elfc::kSttFunc));
+        symtab_bytes.push_back(elfc::kStvDefault);
+        symtab_bytes.push_back(elfc::kShndxText & elfc::kByteMask);
+        symtab_bytes.push_back((elfc::kShndxText >> elfc::kBitsPerByte) & elfc::kByteMask);
+        put_u64(symtab_bytes, symbol_offsets_[i]);        // st_value
+        put_u64(symtab_bytes, kPrototypeFnTextBytes);     // st_size (prototype: one ret)
     }
 
     // Layout the file:
-    //   [0, 64):    ELF header
-    //   [64, 64 + N): .text
-    //   [., . + M): .symtab
-    //   [., . + K): .strtab
-    //   [., . + L): .shstrtab
-    //   [., . + 5*64): section header table
+    //   [0, kEhdrSize):            ELF header
+    //   [., . + |text|):           .text
+    //   [., . + |symtab|):         .symtab
+    //   [., . + |strtab|):         .strtab
+    //   [., . + |shstrtab|):       .shstrtab
+    //   [., . + kSectionCount * kShdrSize): section header table
     out_bytes.clear();
 
     Elf64_Ehdr eh{};
-    std::memcpy(eh.e_ident, "\x7f""ELF", 4);
-    eh.e_ident[4] = 2; // ELFCLASS64
-    eh.e_ident[5] = 1; // ELFDATA2LSB (little-endian)
-    eh.e_ident[6] = 1; // EV_CURRENT
-    eh.e_type     = 1; // ET_REL (relocatable)
-    eh.e_machine  = 62; // EM_X86_64
-    eh.e_version  = 1;
-    eh.e_entry    = 0;
-    eh.e_phoff    = 0;
-    eh.e_ehsize   = sizeof(Elf64_Ehdr);
+    std::memcpy(eh.e_ident, "\x7f""ELF", 4); // NOLINT(magic-numbers) the 4-byte ELF magic prefix, spelled per spec
+    eh.e_ident[elfc::kIdentIdxClass]   = elfc::kElfClass64;
+    eh.e_ident[elfc::kIdentIdxData]    = elfc::kElfData2Lsb;
+    eh.e_ident[elfc::kIdentIdxVersion] = elfc::kEvCurrent;
+    eh.e_type      = elfc::kEtRel;
+    eh.e_machine   = elfc::kEmX86_64;
+    eh.e_version   = elfc::kEvCurrent;
+    eh.e_entry     = 0;
+    eh.e_phoff     = 0;
+    eh.e_ehsize    = sizeof(Elf64_Ehdr);
     eh.e_phentsize = 0;
-    eh.e_phnum    = 0;
+    eh.e_phnum     = 0;
     eh.e_shentsize = sizeof(Elf64_Shdr);
-    eh.e_shnum    = 5; // null + .text + .symtab + .strtab + .shstrtab
-    eh.e_shstrndx = 4; // index of .shstrtab
+    eh.e_shnum     = elfc::kSectionCount;
+    eh.e_shstrndx  = elfc::kShndxShstrtab;
 
     // Append header.
     out_bytes.resize(sizeof(Elf64_Ehdr));
@@ -176,50 +196,50 @@ void EmitterX8664::finalize(std::vector<uint8_t>& out_bytes) {
     uint64_t shstrtab_off = out_bytes.size();
     out_bytes.insert(out_bytes.end(), shstrtab.begin(), shstrtab.end());
 
-    // Section header table comes last. 5 entries.
+    // Section header table comes last.
     uint64_t shoff = out_bytes.size();
-    out_bytes.resize(out_bytes.size() + 5 * sizeof(Elf64_Shdr));
+    out_bytes.resize(out_bytes.size() + elfc::kSectionCount * sizeof(Elf64_Shdr));
     auto* shdrs = reinterpret_cast<Elf64_Shdr*>(out_bytes.data() + shoff);
 
     // Section 0: null.
     std::memset(&shdrs[0], 0, sizeof(Elf64_Shdr));
 
     // Section 1: .text
-    shdrs[1].sh_name      = shstr_text;
-    shdrs[1].sh_type      = 1; // SHT_PROGBITS
-    shdrs[1].sh_flags     = 0x6; // SHF_ALLOC | SHF_EXECINSTR
-    shdrs[1].sh_addr      = 0;
-    shdrs[1].sh_offset    = text_off;
-    shdrs[1].sh_size      = text_bytes_.size();
-    shdrs[1].sh_addralign = 16;
+    shdrs[elfc::kShndxText].sh_name      = shstr_text;
+    shdrs[elfc::kShndxText].sh_type      = elfc::kShtProgbits;
+    shdrs[elfc::kShndxText].sh_flags     = elfc::kShfAlloc | elfc::kShfExecinstr;
+    shdrs[elfc::kShndxText].sh_addr      = 0;
+    shdrs[elfc::kShndxText].sh_offset    = text_off;
+    shdrs[elfc::kShndxText].sh_size      = text_bytes_.size();
+    shdrs[elfc::kShndxText].sh_addralign = elfc::kTextAlign;
 
     // Section 2: .symtab
-    shdrs[2].sh_name      = shstr_symtab;
-    shdrs[2].sh_type      = 2; // SHT_SYMTAB
-    shdrs[2].sh_flags     = 0;
-    shdrs[2].sh_offset    = symtab_off;
-    shdrs[2].sh_size      = symtab_bytes.size();
-    shdrs[2].sh_link      = 3; // points to .strtab
-    shdrs[2].sh_info      = 1; // index of first non-local symbol
-    shdrs[2].sh_addralign = 8;
-    shdrs[2].sh_entsize   = sizeof(Elf64_Sym);
+    shdrs[elfc::kShndxSymtab].sh_name      = shstr_symtab;
+    shdrs[elfc::kShndxSymtab].sh_type      = elfc::kShtSymtab;
+    shdrs[elfc::kShndxSymtab].sh_flags     = 0;
+    shdrs[elfc::kShndxSymtab].sh_offset    = symtab_off;
+    shdrs[elfc::kShndxSymtab].sh_size      = symtab_bytes.size();
+    shdrs[elfc::kShndxSymtab].sh_link      = elfc::kShndxStrtab;
+    shdrs[elfc::kShndxSymtab].sh_info      = elfc::kFirstNonLocalSymbolIndex;
+    shdrs[elfc::kShndxSymtab].sh_addralign = elfc::kSymtabAlign;
+    shdrs[elfc::kShndxSymtab].sh_entsize   = sizeof(Elf64_Sym);
 
     // Section 3: .strtab
-    shdrs[3].sh_name      = shstr_strtab;
-    shdrs[3].sh_type      = 3; // SHT_STRTAB
-    shdrs[3].sh_offset    = strtab_off;
-    shdrs[3].sh_size      = strtab.size();
-    shdrs[3].sh_addralign = 1;
+    shdrs[elfc::kShndxStrtab].sh_name      = shstr_strtab;
+    shdrs[elfc::kShndxStrtab].sh_type      = elfc::kShtStrtab;
+    shdrs[elfc::kShndxStrtab].sh_offset    = strtab_off;
+    shdrs[elfc::kShndxStrtab].sh_size      = strtab.size();
+    shdrs[elfc::kShndxStrtab].sh_addralign = elfc::kStrtabAlign;
 
     // Section 4: .shstrtab
-    shdrs[4].sh_name      = shstr_shstrtab;
-    shdrs[4].sh_type      = 3;
-    shdrs[4].sh_offset    = shstrtab_off;
-    shdrs[4].sh_size      = shstrtab.size();
-    shdrs[4].sh_addralign = 1;
+    shdrs[elfc::kShndxShstrtab].sh_name      = shstr_shstrtab;
+    shdrs[elfc::kShndxShstrtab].sh_type      = elfc::kShtStrtab;
+    shdrs[elfc::kShndxShstrtab].sh_offset    = shstrtab_off;
+    shdrs[elfc::kShndxShstrtab].sh_size      = shstrtab.size();
+    shdrs[elfc::kShndxShstrtab].sh_addralign = elfc::kStrtabAlign;
 
-    // Patch e_shoff in the header.
-    std::memcpy(out_bytes.data() + 0x28, &shoff, 8);
+    // Patch e_shoff in the header (byte offset is ABI-fixed).
+    std::memcpy(out_bytes.data() + offsetof(Elf64_Ehdr, e_shoff), &shoff, elfc::kU64Bytes);
 }
 
 } // namespace aegis::backend::x86

@@ -67,4 +67,28 @@ namespace win {
     constexpr uint32_t kShadowSpaceBytes{32};    // 32-byte shadow space
 } // namespace win
 
+
+// ---- x86-64 register file shape (Rule 66: defaults; Target queries at runtime) ----
+namespace x86_64 {
+    /// Architectural GPR count (RAX-R15). Includes RSP/RBP which are
+    /// reserved by the frame lowering; the allocator sees fewer.
+    constexpr uint32_t kNumGprs{16};
+    /// XMM0-XMM15 (AVX-256 lower halves). YMM/ZMM reuse the same
+    /// register encoding, so the count is identical.
+    constexpr uint32_t kNumVectorRegs{16};
+    /// Spill slot size for one GPR (64-bit slot).
+    constexpr uint32_t kGprSpillSlotBytes{8};
+    /// Spill slot size for one XMM register (128-bit).
+    constexpr uint32_t kXmmSpillSlotBytes{16};
+    /// Spill slot size for one YMM register (256-bit).
+    constexpr uint32_t kYmmSpillSlotBytes{32};
+} // namespace x86_64
+
+/// Stride in bytes of one simplified FDE record in the .eh_frame
+/// section as emitted by the prototype unwinder (EHTables.cpp):
+/// a fixed 24-byte record per function (length + CIE pointer +
+/// function start). Real DWARF CFI varies; this pins the prototype's
+/// deterministic layout so unwind_info_offset math stays greppable.
+constexpr uint32_t kEhFrameEntryStrideBytes{24};
+
 } // namespace aegis::backend::constants

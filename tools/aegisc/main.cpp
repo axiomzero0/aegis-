@@ -2,7 +2,7 @@
 // ============================================================
 // Usage:
 //   aegis <input.aegis> [--dump-ast] [--dump-ir] [--dump-mir] [--run-passes]
-//                        [--no-verify] [--aot | --jit]
+//                        [--no-verify] [--aot | --jit] [--research]
 // ============================================================
 #include <cstdio>
 #include <fstream>
@@ -24,6 +24,7 @@
 #include "aegis/ir/Verifier.hpp"
 #include "aegis/passes/PassManager.hpp"
 #include "aegis/passes/mid/StandardPipeline.hpp"
+#include "aegis/passes/research/ResearchPipeline.hpp"
 #include "aegis/backend/InstrSel.hpp"
 #include "aegis/backend/RegAlloc/LinearScan.hpp"
 #include "aegis/backend/Target.hpp"
@@ -45,6 +46,7 @@ struct CLIDriver {
     bool       run_passes{true};
     bool       no_verify{false};
     bool       jit_mode{false};
+    bool       research{false};
     bool       print_help{false};
 };
 
@@ -60,6 +62,7 @@ CLIDriver parse_args(int argc, char** argv) {
         else if (a == "--no-verify") d.no_verify = true;
         else if (a == "--jit") d.jit_mode = true;
         else if (a == "--aot") d.jit_mode = false;
+        else if (a == "--research") d.research = true;
         else if (a.starts_with("--")) {
             std::cerr << "unknown flag: " << a << "\n";
         } else {
@@ -78,7 +81,10 @@ void print_usage(std::string_view argv0) {
               << "  --no-passes  Skip the optimization pipeline.\n"
               << "  --no-verify  Skip the post-pass verifier.\n"
               << "  --jit        JIT mode (use PGO-driven passes).\n"
-              << "  --aot        AOT mode (default).\n";
+              << "  --aot        AOT mode (default).\n"
+              << "  --research   Append the research passes (40-51) to the\n"
+              << "               pipeline (Rule A.1: one unified pipeline; the\n"
+              << "               speculative passes no-op in AOT mode).\n";
 }
 
 } // namespace
@@ -157,6 +163,15 @@ int main(int argc, char** argv) {
     if (cli.run_passes) {
         aegis::PassManager pm(g);
         auto passes = aegis::passes::mid::build_standard_pipeline();
+        // Rule A.1: the research passes (40-51) are part of the same
+        // unified pipeline — the driver opts into them with --research.
+        // They are budget-aware: in AOT mode the speculative members
+        // require static proof and no-op; in JIT mode they install
+        // guards + FrameStates (Rules A.3, A.5).
+        if (cli.research) {
+            auto research = aegis::passes::research::build_research_pipeline();
+            for (auto& p : research) passes.push_back(std::move(p));
+        }
         for (auto& p : passes) pm.add(std::move(p));
         pm.run(cli.jit_mode ? aegis::CompileMode::JIT
                              : aegis::CompileMode::AOT);
@@ -186,10 +201,12 @@ int main(int argc, char** argv) {
             std::cout << "  " << i << ": " << mi.op;
             if (mi.defs[0] != aegis::kInvalidVReg)
                 std::cout << " v" << mi.defs[0];
-            for (int j = 0; j < 4; ++j) {
+            for (size_t j = 0; j < aegis::kMaxUsesPerInstr; ++j) {
                 if (mi.uses[j] != aegis::kInvalidVReg)
                     std::cout << " v" << mi.uses[j];
             }
+            if (mi.has_imm)
+                std::cout << " #" << mi.imm;
             std::cout << "\n";
         }
     }

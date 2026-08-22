@@ -104,7 +104,8 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         // loop-structure nodes). Rewire the Phi's uses to point at
         // phi_a + mark the second loop's Loop + Phi + back-edge Add +
         // exit CmpLt dead.
-        for (NodeId user : g.outputs()[phi_b].view()) {
+        // Snapshot: swap_input mutates this output list mid-iteration.
+        for (NodeId user : g.users_snapshot(phi_b)) {
             g.swap_input(user, phi_b, phi_a);
         }
         // Mark the second Loop + its Phi + its back-edge Add + its

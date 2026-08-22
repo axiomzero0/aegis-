@@ -1,0 +1,8 @@
+fn f(a: i32, b: i32) -> i32 {
+    let c = a + b;
+    let d = a + b;
+    return c + d;
+}
+fn main() -> i32 {
+    return f(1, 2);
+}

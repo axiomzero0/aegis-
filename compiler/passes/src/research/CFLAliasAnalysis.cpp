@@ -80,10 +80,12 @@ int CFLAliasAnalysisPass::run(Graph& g, const PassBudget& budget) {
     //     stored value's points-to set.
     uint32_t worklist_count = 0;
     bool changed = true;
-    int iterations = 0;
+    // Type matches the named constant (uint32_t) so the comparison
+    // cannot trip -Wsign-compare (Rule 73: no fragile encodings).
+    uint32_t iterations = 0;
     while (changed) {
         changed = false;
-        if (++iterations > 10) break; // limit iterations for soundness
+        if (++iterations > constants::kCflAliasMaxFixpointIterations) break;
         for (NodeId id = 0; id < g.size(); ++id) {
             if (++worklist_count > constants::kCflAliasMaxWorklistNodes) {
                 pgo::TelemetrySink::instance().emit(

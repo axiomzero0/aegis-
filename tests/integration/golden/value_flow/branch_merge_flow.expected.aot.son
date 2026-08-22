@@ -1,0 +1,25 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Constant (Pure) value=0 ins=[]
+n5 : Constant (Pure) value=0 ins=[] DEAD
+n6 : CmpGt (Pure) ins=[3,4]
+n7 : If (Pure) ins=[1,6]
+n8 : Proj (Pure) proj=0 ins=[7]
+n9 : Proj (Pure) proj=1 ins=[7]
+n10 : Neg (Pure) ins=[3]
+n11 : Region (Pure) ins=[8,9]
+n12 : Phi (Pure) ins=[11,3,10]
+n13 : Return (Pure) ins=[11,2,12]
+n14 : Proj (Pure) proj=0 ins=[0] DEAD
+n15 : Proj (Pure) proj=1 ins=[0] DEAD
+n16 : Constant (Pure) value=3 ins=[]
+n17 : CallAltered (Altered) callee=sym2 ins=[1,2,16]
+n18 : Proj (Pure) proj=0 ins=[17] DEAD
+n19 : Return (Pure) ins=[1,17,16]
+n20 : Proj (Pure) proj=1 ins=[0] DEAD
+n21 : Constant (Pure) value=3 ins=[] DEAD
+n22 : Proj (Pure) proj=1 ins=[0] DEAD
+n23 : Proj (Pure) proj=1 ins=[0] DEAD

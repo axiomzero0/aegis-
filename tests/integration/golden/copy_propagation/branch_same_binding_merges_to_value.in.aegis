@@ -1,0 +1,12 @@
+fn f(x: i32) -> i32 {
+    if x > 1 {
+        let t = x + 2;
+        return t;
+    } else {
+        let t = x + 2;
+        return t;
+    }
+}
+fn main() -> i32 {
+    return f(4);
+}

@@ -1,0 +1,6 @@
+fn f(x: i32, a: i32, b: i32, c: i32, d: i32) -> i32 {
+    return (x + a) + (x + b) + (x + c) + (x + d);
+}
+fn main() -> i32 {
+    return f(10, 1, 2, 3, 4);
+}

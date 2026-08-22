@@ -1,0 +1,15 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Constant (Pure) value=1 ins=[] DEAD
+n4 : Constant (Pure) value=2 ins=[] DEAD
+n5 : Add (Pure) ins=[3,4] DEAD
+n6 : Constant (Pure) value=3 ins=[] DEAD
+n7 : Add (Pure) ins=[10,6] DEAD
+n8 : Return (Pure) ins=[1,2,11]
+n9 : Proj (Pure) proj=1 ins=[0] DEAD
+n10 : Constant (Pure) value=3 ins=[] DEAD
+n11 : Constant (Pure) value=6 ins=[]
+n12 : Proj (Pure) proj=1 ins=[0] DEAD
+n13 : Proj (Pure) proj=1 ins=[0] DEAD

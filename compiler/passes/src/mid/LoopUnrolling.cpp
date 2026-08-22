@@ -223,13 +223,17 @@ int LoopUnrollingPass::run(Graph& g, const PassBudget& budget) {
         // iterations are known at compile time). The exit CmpLt's
         // uses (if any — e.g. it feeds nothing in our degenerate
         // case) are rewired to a start-value Constant.
+        // Rule 73: make_constant may reallocate the node vector; the
+        // `Node& n` from the loop head must not be used after this
+        // point — re-index via g[id] instead.
         NodeId start_const = g.make_constant_i64(start, g[phi_id].type_id);
         // Rewire any remaining uses of the Phi to point at start_const.
-        for (NodeId user : g.outputs()[phi_id].view()) {
+        // Snapshot: swap_input mutates this output list mid-iteration.
+        for (NodeId user : g.users_snapshot(phi_id)) {
             g.swap_input(user, phi_id, start_const);
         }
         // Mark Loop + Phi + back-edge Add + exit CmpLt dead.
-        n.flags.set(NodeFlagBit::IsDead);
+        g[id].flags.set(NodeFlagBit::IsDead); // re-fetch (Rule 73)
         g[phi_id].flags.set(NodeFlagBit::IsDead);
         g[back_add].flags.set(NodeFlagBit::IsDead);
         if (exit_cmp != kInvalidNodeId) {

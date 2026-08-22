@@ -39,10 +39,14 @@ int  log2_pow2(uint64_t v) noexcept {
 int StrengthReductionPass::run(Graph& g, const PassBudget& budget) {
     int replaced = 0;
     for (NodeId id = 0; id < g.size(); ++id) {
-        Node& n = g[id];
-        if (n.flags.has(NodeFlagBit::IsDead)) continue;
-        if (!n.is_pure()) continue;
-        auto d = n.data_ins();
+        // Rule 73: do NOT hold a Node& across the make_* calls below —
+        // they append to the node vector and a reallocation would
+        // dangle the reference. Snapshot the fields we need by value.
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (!g[id].is_pure()) continue;
+        const NodeKind kind = g[id].kind;
+        const TypeId  ty    = g[id].type_id;
+        auto d = g[id].data_ins();
         if (d.size() != 2) continue;
         NodeId lhs = d[0];
         NodeId rhs = d[1];
@@ -60,29 +64,29 @@ int StrengthReductionPass::run(Graph& g, const PassBudget& budget) {
         auto rval = const_val(rhs_n);
 
         NodeId new_node = kInvalidNodeId;
-        NodeKind new_kind = n.kind; // default unchanged
+        NodeKind new_kind = kind; // default unchanged
 
-        switch (n.kind) {
+        switch (kind) {
             case NodeKind::Mul:
                 if (rval && *rval == 1) {
                     // x * 1 -> x. Mark n dead, rewire all uses to lhs.
                     new_node = lhs;
                 } else if (rval && *rval == 0) {
                     // x * 0 -> 0.
-                    new_node = g.make_constant_i64(0, n.type_id);
+                    new_node = g.make_constant_i64(0, ty);
                 } else if (rval && is_power_of_two(static_cast<uint64_t>(*rval))) {
                     // x * 2^k -> x << k.
                     int k = log2_pow2(static_cast<uint64_t>(*rval));
-                    NodeId shift_amt = g.make_constant_i64(k, n.type_id);
-                    new_node = g.make_binop(NodeKind::Shl, lhs, shift_amt, n.type_id);
+                    NodeId shift_amt = g.make_constant_i64(k, ty);
+                    new_node = g.make_binop(NodeKind::Shl, lhs, shift_amt, ty);
                 }
                 break;
             case NodeKind::UDiv:
                 if (rval && is_power_of_two(static_cast<uint64_t>(*rval)) && *rval > 0) {
                     // x / 2^k -> x >> k (logical).
                     int k = log2_pow2(static_cast<uint64_t>(*rval));
-                    NodeId shift_amt = g.make_constant_i64(k, n.type_id);
-                    new_node = g.make_binop(NodeKind::LShr, lhs, shift_amt, n.type_id);
+                    NodeId shift_amt = g.make_constant_i64(k, ty);
+                    new_node = g.make_binop(NodeKind::LShr, lhs, shift_amt, ty);
                 }
                 break;
             case NodeKind::Add:
@@ -93,25 +97,25 @@ int StrengthReductionPass::run(Graph& g, const PassBudget& budget) {
                 if (rval && *rval == 0) new_node = lhs;
                 else if (lhs == rhs) {
                     // x - x = 0.
-                    new_node = g.make_constant_i64(0, n.type_id);
+                    new_node = g.make_constant_i64(0, ty);
                 }
                 break;
             case NodeKind::And:
-                if (rval && *rval == 0) new_node = g.make_constant_i64(0, n.type_id);
+                if (rval && *rval == 0) new_node = g.make_constant_i64(0, ty);
                 else if (rval && *rval == -1) new_node = lhs;
-                else if (lval && *lval == 0) new_node = g.make_constant_i64(0, n.type_id);
+                else if (lval && *lval == 0) new_node = g.make_constant_i64(0, ty);
                 else if (lval && *lval == -1) new_node = rhs;
                 break;
             case NodeKind::Or:
                 if (rval && *rval == 0) new_node = lhs;
-                else if (rval && *rval == -1) new_node = g.make_constant_i64(-1, n.type_id);
+                else if (rval && *rval == -1) new_node = g.make_constant_i64(-1, ty);
                 else if (lval && *lval == 0) new_node = rhs;
-                else if (lval && *lval == -1) new_node = g.make_constant_i64(-1, n.type_id);
+                else if (lval && *lval == -1) new_node = g.make_constant_i64(-1, ty);
                 break;
             case NodeKind::Xor:
                 if (rval && *rval == 0) new_node = lhs;
                 else if (lval && *lval == 0) new_node = rhs;
-                else if (lhs == rhs) new_node = g.make_constant_i64(0, n.type_id);
+                else if (lhs == rhs) new_node = g.make_constant_i64(0, ty);
                 break;
             default: break;
         }
@@ -119,11 +123,12 @@ int StrengthReductionPass::run(Graph& g, const PassBudget& budget) {
 
         if (new_node != kInvalidNodeId) {
             // Rewire all downstream uses to point to new_node, then
-            // mark the original as Dead.
-            for (NodeId user : g.outputs()[id].view()) {
+            // mark the original as Dead. SNAPSHOT first: swap_input
+            // mutates this output list mid-iteration otherwise.
+            for (NodeId user : g.users_snapshot(id)) {
                 g.swap_input(user, id, new_node);
             }
-            n.flags.set(NodeFlagBit::IsDead);
+            g[id].flags.set(NodeFlagBit::IsDead); // re-fetch (Rule 73)
             ++replaced;
         }
     }

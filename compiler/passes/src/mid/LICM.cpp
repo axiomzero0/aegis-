@@ -33,6 +33,7 @@
 #include "aegis/passes/mid/LICM.hpp"
 
 #include "aegis/ir/NodeKind.hpp"
+#include "aegis/passes/PassConstants.hpp"
 #include "aegis/pgo/Telemetry.hpp"
 
 namespace aegis::passes::mid {
@@ -50,7 +51,7 @@ int LICMPass::run(Graph& g, const PassBudget& budget) {
         // Emit telemetry so the LICM gap is visible — passes that
         // could optimize but don't yet (because alias analysis isn't
         // integrated) emit a budget-exceeded event per Rule 65.
-        char detail[64];
+        char detail[passes::constants::kLicmTelemetryDetailBytes];
         int n = std::snprintf(detail, sizeof(detail),
                               "loops=%d reason=alias_analysis_not_integrated",
                               loop_count);

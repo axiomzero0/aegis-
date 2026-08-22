@@ -60,6 +60,7 @@ std::string fmt_payload(NodeKind k, NodePayload p) {
         case NodeKind::CmpUge:
         case NodeKind::Neg:
         case NodeKind::Not:
+        case NodeKind::BitNot:
         case NodeKind::Load:
         case NodeKind::Store:
         case NodeKind::Alloc:

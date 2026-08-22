@@ -1,0 +1,13 @@
+fn g(v: i32) -> i32 {
+    return v + 1;
+}
+fn f(x: i32) -> i32 {
+    if g(x) > 2 {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+fn main() -> i32 {
+    return f(16);
+}

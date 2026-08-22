@@ -1,7 +1,0 @@
-fn sr() -> i32 {
-    let a = 10;
-    let b = a * 2;
-    let c = a + 0;
-    let d = b - b;
-    return b;
-}

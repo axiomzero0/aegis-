@@ -36,6 +36,10 @@ int SpeculativeBCEPass::run(Graph& g, const PassBudget& budget) {
     for (NodeId id = 0; id < g.size(); ++id) {
         if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
         if (g[id].kind != NodeKind::Guard) continue;
+        // Rule B.5 (idempotency): a guard that was already speculated
+        // keeps its FrameState; re-speculating would duplicate it on
+        // every fixpoint iteration.
+        if (g[id].flags.has(NodeFlagBit::IsPgoSpeculated)) continue;
         auto d = g[id].data_ins();
         if (d.empty()) continue;
         NodeId cond_id = d[0];

@@ -1,0 +1,9 @@
+fn g(v: i32) -> i32 {
+    return v + 1;
+}
+fn h(v: i32) -> i32 {
+    return g(v) * 2;
+}
+fn main() -> i32 {
+    return h(9);
+}

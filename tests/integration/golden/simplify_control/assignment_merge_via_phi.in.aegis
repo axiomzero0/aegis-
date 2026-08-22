@@ -1,0 +1,12 @@
+fn f(x: i32) -> i32 {
+    var t = 0;
+    if x > 0 {
+        t = 5;
+    } else {
+        t = 9;
+    }
+    return t;
+}
+fn main() -> i32 {
+    return f(1);
+}

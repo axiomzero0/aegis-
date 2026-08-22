@@ -16,6 +16,14 @@ TokenKind binary_op_kind(TokenKind k) noexcept {
         case TokenKind::Lt: case TokenKind::LtEq:
         case TokenKind::Gt: case TokenKind::GtEq:
         case TokenKind::AndAnd: case TokenKind::OrOr:
+        // Assignment operators MUST be recognized here so the Pratt
+        // loop can dispatch them to ASTAssignExpr below. Omitting them
+        // made every assignment statement (`x = 5;`) a parse error —
+        // the ASTAssignExpr / Lowering support was unreachable dead
+        // code (root-cause fix; Rule 68).
+        case TokenKind::Eq: case TokenKind::PlusEq:
+        case TokenKind::MinusEq: case TokenKind::StarEq:
+        case TokenKind::SlashEq:
             return k;
         default: return TokenKind::Eof;
     }
@@ -187,6 +195,14 @@ Expected<ASTPtr> Parser::parse_stmt() {
     // Expression statement (optional trailing semicolon).
     auto e = parse_expr();
     if (!e.has_value()) return std::unexpected(e.error());
+    // An assignment IS a statement (the Lowerer's lower_stmt handles
+    // ASTAssignExpr directly). Wrapping it in an ExprStmt would route
+    // it through lower_expr's fallback and silently drop the store —
+    // return it un-wrapped so the binding takes effect.
+    if ((*e)->kind == ASTKind::AssignExpr) {
+        consume(TokenKind::Semicolon);
+        return e;
+    }
     if (consume(TokenKind::Semicolon)) {
         auto es = std::make_unique<ASTExprStmt>();
         es->expr = std::move(*e);
@@ -338,7 +354,12 @@ Expected<ASTPtr> Parser::parse_expr(int min_prec) {
         int prec = precedence(op);
         if (prec < min_prec) break;
         ++pos_;
-        auto rhs = parse_expr(prec + 1);
+        // Assignments are right-associative: parse the RHS at the SAME
+        // precedence (not prec+1) so `a = b = c` nests as a = (b = c).
+        int rhs_prec = (op == TokenKind::Eq || op == TokenKind::PlusEq ||
+                        op == TokenKind::MinusEq || op == TokenKind::StarEq ||
+                        op == TokenKind::SlashEq) ? prec : prec + 1;
+        auto rhs = parse_expr(rhs_prec);
         if (!rhs.has_value()) return std::unexpected(rhs.error());
 
         if (op == TokenKind::Eq || op == TokenKind::PlusEq || op == TokenKind::MinusEq ||

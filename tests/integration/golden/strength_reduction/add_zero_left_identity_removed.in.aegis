@@ -1,0 +1,6 @@
+fn f(x: i32) -> i32 {
+    return 0 + x;
+}
+fn main() -> i32 {
+    return f(5);
+}

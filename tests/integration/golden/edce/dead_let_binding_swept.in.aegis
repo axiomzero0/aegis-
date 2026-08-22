@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    let dead = 5;
+    return 1;
+}

@@ -1,0 +1,19 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Constant (Pure) value=1 ins=[] DEAD
+n4 : Constant (Pure) value=2 ins=[] DEAD
+n5 : CmpGt (Pure) ins=[3,4] DEAD
+n6 : If (Pure) ins=[1,15] DEAD
+n7 : Proj (Pure) proj=0 ins=[6] DEAD
+n8 : Proj (Pure) proj=1 ins=[6] DEAD
+n9 : Constant (Pure) value=10 ins=[]
+n10 : Return (Pure) ins=[1,2,9]
+n11 : Constant (Pure) value=20 ins=[]
+n12 : Return (Pure) ins=[1,2,11]
+n13 : Region (Pure) ins=[_,_] DEAD
+n14 : Proj (Pure) proj=1 ins=[0] DEAD
+n15 : Constant (Pure) value=0 ins=[] DEAD
+n16 : Proj (Pure) proj=1 ins=[0] DEAD
+n17 : Proj (Pure) proj=1 ins=[0] DEAD

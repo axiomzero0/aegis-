@@ -1,0 +1,31 @@
+Aegis Compiler — Proprietary License
+
+Copyright (c) 2026 Aegis Systems Dev Team. All rights reserved.
+
+STATUS: UNRELEASED PROTOTYPE. This software is not yet licensed for
+any use outside the owning organization.
+
+1. NO LICENSE GRANT. No rights are granted under this license beyond
+   the limited internal-evaluation rights in Section 2. All rights
+   not explicitly granted here are reserved by the copyright holder.
+
+2. INTERNAL EVALUATION. The copyright holder and its members may
+   compile, run, and modify this software for internal evaluation and
+   development purposes. Redistribution in source or binary form,
+   in whole or in part, is NOT permitted.
+
+3. NO WARRANTY. This software is provided "AS IS", without warranty
+   of any kind, express or implied, including but not limited to the
+   warranties of merchantability, fitness for a particular purpose,
+   and noninfringement. In no event shall the copyright holder be
+   liable for any claim, damages, or other liability arising from,
+   out of, or in connection with the software or its use.
+
+4. FUTURE LICENSING. A permissive open-source license is planned for
+   the first public release; until then this file governs. Contact
+   the Aegis Systems Dev Team for licensing questions.
+
+(This notice intentionally matches the README's statement that the
+project is "currently unreleased, all rights reserved". When the
+public-release license is chosen, replace this file in the same
+commit that announces the release.)

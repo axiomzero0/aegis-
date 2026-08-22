@@ -1,0 +1,22 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Constant (Pure) value=12 ins=[]
+n5 : And (Pure) ins=[3,4]
+n6 : Constant (Pure) value=3 ins=[]
+n7 : Xor (Pure) ins=[3,6]
+n8 : Or (Pure) ins=[5,7]
+n9 : Return (Pure) ins=[1,2,8]
+n10 : Proj (Pure) proj=0 ins=[0] DEAD
+n11 : Proj (Pure) proj=1 ins=[0] DEAD
+n12 : Constant (Pure) value=9 ins=[]
+n13 : CallAltered (Altered) callee=sym2 ins=[1,2,12,20] +guarded +fs +pgo
+n14 : Proj (Pure) proj=0 ins=[13] DEAD
+n15 : Return (Pure) ins=[1,13,12]
+n16 : Proj (Pure) proj=1 ins=[0] DEAD
+n17 : Constant (Pure) value=9 ins=[] DEAD
+n18 : Proj (Pure) proj=1 ins=[0] DEAD
+n19 : Proj (Pure) proj=1 ins=[0] DEAD
+n20 : FrameState (Pure) fs=0 ins=[1,2]

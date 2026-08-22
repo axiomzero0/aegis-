@@ -1,0 +1,30 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Constant (Pure) value=3 ins=[]
+n4 : Constant (Pure) value=5 ins=[] DEAD
+n5 : CmpLt (Pure) ins=[3,4] DEAD
+n6 : Constant (Pure) value=5 ins=[] DEAD
+n7 : Constant (Pure) value=5 ins=[] DEAD
+n8 : CmpLe (Pure) ins=[6,7] DEAD
+n9 : Add (Pure) ins=[20,21] DEAD
+n10 : Constant (Pure) value=4 ins=[] DEAD
+n11 : Constant (Pure) value=9 ins=[] DEAD
+n12 : CmpGt (Pure) ins=[10,11] DEAD
+n13 : Add (Pure) ins=[22,23] DEAD
+n14 : Constant (Pure) value=4 ins=[] DEAD
+n15 : Constant (Pure) value=4 ins=[] DEAD
+n16 : CmpGe (Pure) ins=[14,15] DEAD
+n17 : Add (Pure) ins=[24,25] DEAD
+n18 : Return (Pure) ins=[1,2,3]
+n19 : Proj (Pure) proj=1 ins=[0] DEAD
+n20 : Constant (Pure) value=1 ins=[] DEAD
+n21 : Constant (Pure) value=1 ins=[] DEAD
+n22 : Constant (Pure) value=2 ins=[] DEAD
+n23 : Constant (Pure) value=0 ins=[] DEAD
+n24 : Constant (Pure) value=2 ins=[] DEAD
+n25 : Constant (Pure) value=1 ins=[] DEAD
+n26 : Constant (Pure) value=3 ins=[] DEAD
+n27 : Proj (Pure) proj=1 ins=[0] DEAD
+n28 : Proj (Pure) proj=1 ins=[0] DEAD

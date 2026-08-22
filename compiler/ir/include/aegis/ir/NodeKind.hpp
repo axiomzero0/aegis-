@@ -61,8 +61,11 @@ enum class NodeKind : uint16_t {
     CmpUle       = 33, // Pure: unsigned <=
     CmpUgt       = 34, // Pure: unsigned >
     CmpUge       = 35, // Pure: unsigned >=
-    Neg          = 36, // Pure: unary negation
-    Not          = 37, // Pure: bitwise/not
+    Neg          = 36, // Pure: unary negation (-x)
+    Not          = 37, // Pure: logical not (!x)
+    BitNot       = 49, // Pure: bitwise not (~x). Distinct kind from Not
+                       // so constant folding is unambiguous (Rule 69 —
+                       // no implicit semantic coercions in the IR).
     Load         = 38, // Altered: read from memory (in the effect chain)
     Store        = 39, // Altered: write to memory (in the effect chain)
     Alloc        = 40, // Altered: heap allocation (escapable via escape analysis)
@@ -139,6 +142,7 @@ enum class EffectClass : uint8_t {
         case NodeKind::CmpUge:       return "CmpUge";
         case NodeKind::Neg:          return "Neg";
         case NodeKind::Not:          return "Not";
+        case NodeKind::BitNot:       return "BitNot";
         case NodeKind::Load:         return "Load";
         case NodeKind::Store:        return "Store";
         case NodeKind::Alloc:        return "Alloc";
@@ -223,6 +227,7 @@ enum class EffectClass : uint8_t {
         case NodeKind::CmpUge:
         case NodeKind::Neg:
         case NodeKind::Not:
+        case NodeKind::BitNot:
         case NodeKind::StackAlloc:
         case NodeKind::GetElementPtr:
         case NodeKind::GetFieldPtr:

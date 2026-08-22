@@ -196,8 +196,16 @@ Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
             // Merge via Region.
             NodeId merge = g_.make_region({ctrl_after_then, ctrl_after_else});
             current_ctrl_ = merge;
-            current_eff_ = eff_after_then;
-            (void)eff_after_else;
+            // Effect after the merge: a branch that RETURNED contributes
+            // no continuing effect (its eff snapshot is invalid), so the
+            // post-if effect chain must come from whichever branch can
+            // still fall through. Pre-fix this unconditionally used the
+            // THEN branch's effect, so any call after an if-with-return
+            // lowered with NO effect-in edge — corrupting the effect
+            // chain (Rule 42 caught it; the verifier requires every
+            // non-Pure node to have a live effect-in edge).
+            current_eff_ = (eff_after_then != kInvalidNodeId) ? eff_after_then
+                                                               : eff_after_else;
 
             // Merge let-bindings that were modified in either branch via
             // Phi nodes. For each binding that exists in both branches
@@ -299,7 +307,12 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
             const auto& u = static_cast<const ASTUnaryExpr&>(n);
             auto x = lower_expr(*u.operand);
             if (!x.has_value()) return std::unexpected(x.error());
-            NodeKind k = (u.op == TokenKind::Minus) ? NodeKind::Neg : NodeKind::Not;
+            // `!x` is logical not; `~x` is bitwise not; `-x` negates.
+            // BitNot is a distinct NodeKind so SCCP folds each with
+            // unambiguous semantics (Rule 69).
+            NodeKind k = NodeKind::Not;
+            if (u.op == TokenKind::Minus)     k = NodeKind::Neg;
+            else if (u.op == TokenKind::Tilde) k = NodeKind::BitNot;
             return hc_.lookup_or_insert(k, {*x}, kInvalidTypeId, NodePayload{});
         }
         case ASTKind::CallExpr: {
@@ -328,6 +341,34 @@ Expected<NodeId> Lowerer::lower_expr(const ASTNode& n) {
                 current_eff_ = call;
             }
             return g_.make_proj(call, 0);
+        }
+        case ASTKind::AssignExpr: {
+            // Assignment in expression position (`let x = (a = 5);`):
+            // perform the binding, then yield the assigned value. This
+            // must NOT fall through to the default case — the default
+            // returns constant 0, which would silently discard the
+            // store (Rule D.3).
+            const auto& a = static_cast<const ASTAssignExpr&>(n);
+            auto val = lower_expr(*a.value);
+            if (!val.has_value()) return std::unexpected(val.error());
+            if (a.target && a.target->kind == ASTKind::Ident) {
+                const auto& ident = static_cast<const ASTIdent&>(*a.target);
+                SymbolId name = ident.name;
+                if (a.op == TokenKind::Eq) {
+                    bindings_.insert(name, *val);
+                } else {
+                    const NodeId* cur = bindings_.get(name);
+                    NodeId lhs = (cur != nullptr) ? *cur
+                        : g_.make_constant_i64(0, kInvalidTypeId);
+                    NodeKind k = binop_to_node_kind(a.op);
+                    NodeId folded = hc_.lookup_or_insert(k, {lhs, *val},
+                                                         kInvalidTypeId,
+                                                         NodePayload{});
+                    bindings_.insert(name, folded);
+                    return folded;
+                }
+            }
+            return *val;
         }
         case ASTKind::Block: {
             const auto& b = static_cast<const ASTBlock&>(n);

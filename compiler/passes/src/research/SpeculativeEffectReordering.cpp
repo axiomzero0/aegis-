@@ -31,12 +31,19 @@ int SpeculativeEffectReorderingPass::run(Graph& g, const PassBudget& budget) {
     for (NodeId id = 0; id < g.size(); ++id) {
         if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
         if (g[id].kind != NodeKind::Load) continue;
+        // Rule B.5 (idempotency): a load that was already speculated
+        // keeps its FrameState; re-speculating would duplicate it on
+        // every fixpoint iteration.
+        if (g[id].flags.has(NodeFlagBit::IsPgoSpeculated)) continue;
         // SOUND: capture by value before make_frame_state (Rule 73).
         NodeId ctrl_in = g[id].ctrl_in();
         NodeId eff_in  = g[id].eff_in();
         NodeId fs = g.make_frame_state({ctrl_in, eff_in});
-        // Re-fetch by id after potential reallocation.
-        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        // Attach the FrameState as an input edge (visible in dumps,
+        // kept alive for liveness sweeps). Load nodes are payload-less
+        // so nothing is clobbered either way — we use the edge for
+        // uniformity with the other speculation passes.
+        g.append_input(id, fs);
         g[id].flags.set(NodeFlagBit::IsPgoSpeculated |
                         NodeFlagBit::HasFrameState |
                         NodeFlagBit::IsGuarded);

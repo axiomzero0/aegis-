@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# scripts/build_tests.sh — Build the unit test suites against the new layout.
+# scripts/build_tests.sh — Build the unit + regression + perf test suites.
+#
+# Mirrors tests/CMakeLists.txt exactly (both build systems must stay
+# in sync — the dual-build contract is documented in the README).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
-TESTS="$ROOT/tests/unit"
+UNIT="$ROOT/tests/unit"
+REGRESSION="$ROOT/tests/regression"
+PERF="$ROOT/tests/perf"
 
 # Use the same flags as the main build.
 CXX=g++
@@ -75,19 +80,34 @@ PASSES_SRC=(
     "$ROOT/compiler/passes/src/mid/NullPointerElimination.cpp"
     "$ROOT/compiler/passes/src/mid/RCOptimization.cpp"
 )
+# Research passes: needed by test_loop_speculative, test_regression,
+# and the ResearchPipeline builder (Rule A.1 unified pipeline).
+RESEARCH_SRC=(
+    "$ROOT/compiler/passes/src/research/ResearchPipeline.cpp"
+    "$ROOT/compiler/passes/src/research/CFLAliasAnalysis.cpp"
+    "$ROOT/compiler/passes/src/research/ValueFlowAnalysis.cpp"
+    "$ROOT/compiler/passes/src/research/PGDLO.cpp"
+    "$ROOT/compiler/passes/src/research/MemPoolSynthesis.cpp"
+    "$ROOT/compiler/passes/src/research/CacheObliviousLayout.cpp"
+    "$ROOT/compiler/passes/src/research/SLPVectorization.cpp"
+    "$ROOT/compiler/passes/src/research/AutoParallelization.cpp"
+    "$ROOT/compiler/passes/src/research/SpeculativeLockElision.cpp"
+    "$ROOT/compiler/passes/src/research/GuardedDevirtualization.cpp"
+    "$ROOT/compiler/passes/src/research/SpeculativeEffectReordering.cpp"
+    "$ROOT/compiler/passes/src/research/SpeculativeBCE.cpp"
+    "$ROOT/compiler/passes/src/research/BOLTLayout.cpp"
+)
 BACKEND_SRC=(
     "$ROOT/compiler/backend/src/RegAlloc/LinearScan.cpp"
     "$ROOT/compiler/backend/src/x86/InstrSel_x86.cpp"
 )
 
 # Per-test dependencies.
-build_test() {
-    local name="$1"; shift
-    local test_src="$TESTS/$name.cpp"
-    "$CXX" "${CXXFLAGS[@]}" "$test_src" "$@" -o "$BUILD/$name"
-    echo "OK -> $BUILD/$name"
-}
-
+#
+# Shared sources are compiled ONCE into $BUILD/test_obj/ (in parallel,
+# one job per core) and every test binary links against them — CI on a
+# 2-core runner stays well inside its timeout this way, and the object
+# set is identical for every test by construction.
 # Telemetry + runtime I/O sources (needed because PassManager now
 # emits telemetry on budget exceeded + verifier failed, and the
 # telemetry sink writes to stderr via runtime io).
@@ -100,10 +120,51 @@ RUNTIME_IO_SRC=(
     "$ROOT/runtime/io/src/syscall.cpp"
 )
 
-build_test test_core_containers "${SUPPORT_SRC[@]}"
-build_test test_ir_graph "${SUPPORT_SRC[@]}" "${IR_SRC[@]}"
-build_test test_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
-build_test test_frontend_smoke "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${FRONTEND_SRC[@]}"
-build_test test_new_passes "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
-build_test test_telemetry "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
-build_test test_sound_rewrites "${SUPPORT_SRC[@]}" "${IR_SRC[@]}" "${PASSES_SRC[@]}" "${PGO_SRC[@]}" "${RUNTIME_IO_SRC[@]}"
+# ---- Shared compile-once object set ----
+SHARED_SRC=(
+    "${SUPPORT_SRC[@]}"
+    "${IR_SRC[@]}"
+    "${FRONTEND_SRC[@]}"
+    "${PASSES_SRC[@]}"
+    "${RESEARCH_SRC[@]}"
+    "${BACKEND_SRC[@]}"
+    "${PGO_SRC[@]}"
+    "${RUNTIME_IO_SRC[@]}"
+)
+export CXX
+mkdir -p "$BUILD/test_obj"
+JOB_LIST=()
+SHARED_OBJ=()
+for src in "${SHARED_SRC[@]}"; do
+    obj="$BUILD/test_obj/$(basename "$src").o"
+    SHARED_OBJ+=("$obj")
+    JOB_LIST+=("$obj|$src")
+done
+printf '%s\n' "${JOB_LIST[@]}" | xargs -P "$(nproc)" -I{} bash -c '
+    IFS="|" read -r obj src <<< "{}"
+    echo "CXX  $(basename "$src")"
+    "$CXX" "${@}" -c "$src" -o "$obj"
+' _ "${CXXFLAGS[@]}"
+
+build_test() {
+    local name="$1"; shift
+    local test_src="$1"; shift
+    "$CXX" "${CXXFLAGS[@]}" "$test_src" "${SHARED_OBJ[@]}" "$@" -o "$BUILD/$name"
+    echo "OK -> $BUILD/$name"
+}
+
+
+build_test test_core_containers "$UNIT/test_core_containers.cpp"
+build_test test_ir_graph "$UNIT/test_ir_graph.cpp"
+build_test test_passes "$UNIT/test_passes.cpp"
+build_test test_frontend_smoke "$UNIT/test_frontend_smoke.cpp"
+build_test test_new_passes "$UNIT/test_new_passes.cpp"
+build_test test_telemetry "$UNIT/test_telemetry.cpp"
+build_test test_sound_rewrites "$UNIT/test_sound_rewrites.cpp"
+build_test test_loop_speculative "$UNIT/test_loop_speculative.cpp"
+
+# Rule 36 regression suite (tests/regression/).
+build_test test_regression "$REGRESSION/test_regression.cpp"
+
+# Rule 41 perf suite (tests/perf/).
+build_test bench_pipeline "$PERF/bench_pipeline.cpp"

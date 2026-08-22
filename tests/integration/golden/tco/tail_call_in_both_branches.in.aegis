@@ -1,0 +1,16 @@
+fn g(v: i32) -> i32 {
+    return v + 1;
+}
+fn h(v: i32) -> i32 {
+    return v + 2;
+}
+fn f(x: i32) -> i32 {
+    if x > 0 {
+        return g(x);
+    } else {
+        return h(x);
+    }
+}
+fn main() -> i32 {
+    return f(4);
+}

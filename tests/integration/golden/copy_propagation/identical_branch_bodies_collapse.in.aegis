@@ -1,0 +1,10 @@
+fn f(x: i32) -> i32 {
+    if x > 0 {
+        return x * 2;
+    } else {
+        return x * 2;
+    }
+}
+fn main() -> i32 {
+    return f(3);
+}

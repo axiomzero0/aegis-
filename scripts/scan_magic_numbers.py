@@ -5,11 +5,18 @@ Scans every .cpp/.hpp file under compiler/ + runtime/ + tools/ for
 suspicious magic numbers in logic. Allowed: literals 0, 1, -1, 2, -2,
 true, false. Larger numbers must come from a named constexpr.
 
-Files exempted (where named constants are awkward):
-  - None for now — this is a strict rule.
-
-False positives can be marked with an inline `// NOLINT(magic-numbers)`
-comment that explains why this specific literal is OK.
+Files/lines exempted (principled, not filename hacks):
+  - Lines that DEFINE a named constant (`constexpr ... kName{N}`) —
+    the literal is the definition, which is exactly the compliant
+    pattern Rule 61 asks for.
+  - Enum member definitions (`RAX = 0,`) — hardware register
+    encodings and similar declarative tables (Law D.2 explicitly
+    endorses declarative tables for ABI definitions; the member name
+    is the documentation).
+  - Numeric literals inside string literals and comments (they are
+    text, not logic).
+  - Lines carrying an inline `// NOLINT(magic-numbers)` marker with a
+    justification.
 
 Exits non-zero if any violation is found.
 """
@@ -17,7 +24,12 @@ import re
 import sys
 from pathlib import Path
 
-REPO = Path("/home/z/my-project/aegis")
+# Resolve the repo root from THIS SCRIPT's location so the scan works
+# in any checkout (CI, fresh clone, local). A hard-coded absolute path
+# would silently scan nothing when the checkout moves — a Rule D.3
+# silent-fallback defect.
+REPO = Path(__file__).resolve().parent.parent
+
 # Rule 61 specifically targets "any optimization pass" — so we scan
 # compiler/passes/ and compiler/backend/ where pass/backend logic lives.
 # Frontend, runtime, tools, support headers have legitimate use of
@@ -38,6 +50,27 @@ LITERAL_RE = re.compile(
     r'(?![\w.])'                # not followed by word char
 )
 
+# A line that DEFINES a named constant: `constexpr uint32_t kFoo{64};`
+# or `static constexpr size_t kBar = 3;`. The literal on such a line
+# is the value of the documented constant — the compliant pattern.
+CONST_DEF_RE = re.compile(r'\bconstexpr\b')
+
+# An enum member definition: `RAX = 0,` / `XMM10 = 10,`. Declarative
+# tables for hardware encodings (Law D.2); the name documents the
+# number.
+ENUM_MEMBER_RE = re.compile(r'^\s*[A-Za-z_]\w*\s*=\s*-?\d+\s*[,;}]')
+
+# Strip string literals first (so a // inside a string does not look
+# like a comment start), then strip // comments.
+STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+LINE_COMMENT_RE = re.compile(r'//[^\n]*')
+
+def strip_noncode(line: str) -> str:
+    """Remove string literals and // comments from a source line."""
+    line = STRING_RE.sub('""', line)
+    line = LINE_COMMENT_RE.sub('', line)
+    return line
+
 def scan_file(path: Path) -> list[str]:
     violations = []
     # Exempt: PassConstants.hpp is the file where named constants are
@@ -49,7 +82,18 @@ def scan_file(path: Path) -> list[str]:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return violations
+    in_block_comment = False
     for line_no, line in enumerate(text.splitlines(), start=1):
+        # Track block comments spanning multiple lines.
+        if in_block_comment:
+            if "*/" in line:
+                in_block_comment = False
+                line = line.split("*/", 1)[1]
+            else:
+                continue
+        if "/*" in line and "*/" not in line:
+            in_block_comment = True
+            line = line.split("/*", 1)[0]
         # Skip comment-only lines.
         stripped = line.lstrip()
         if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
@@ -57,19 +101,32 @@ def scan_file(path: Path) -> list[str]:
         # Skip lines with NOLINT.
         if "NOLINT(magic-numbers)" in line or "NOLINT(magic)" in line:
             continue
-        # Find all numeric literals.
-        for m in LITERAL_RE.finditer(line):
+        code = strip_noncode(line)
+        # Skip constant definitions and enum member definitions — the
+        # literal is the (documented) definition itself.
+        if CONST_DEF_RE.search(code):
+            continue
+        if ENUM_MEMBER_RE.match(code):
+            continue
+        # Find all numeric literals in the code part of the line.
+        for m in LITERAL_RE.finditer(code):
             literal = m.group(1)
             if literal in ALLOWED:
                 continue
-            # Hex literals are OK if they're flag bits (1 << N) — but
-            # we still report them so the human can review.
             violations.append(
                 f"{path}:{line_no}: magic number '{literal}' in: {line.strip()}"
             )
     return violations
 
 def main() -> int:
+    # Rule D.3: fail loudly (not vacuously) if the source tree is not
+    # where this script expects it. A missing directory previously made
+    # the scan pass with zero files checked.
+    missing = [d for d in SCAN_DIRS if not d.is_dir()]
+    if missing:
+        print(f"FAIL: scan directories do not exist: {[str(d) for d in missing]}")
+        print(f"      (resolved repo root: {REPO})")
+        return 2
     all_violations = []
     for d in SCAN_DIRS:
         for path in d.rglob("*"):

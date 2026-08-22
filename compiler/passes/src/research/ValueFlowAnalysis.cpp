@@ -67,10 +67,12 @@ int ValueFlowAnalysisPass::run(Graph& g, const PassBudget& budget) {
     std::vector<SiteSet> may_point_to(g.size());
 
     bool changed = true;
-    int iterations = 0;
+    // Type matches the named constant (uint32_t) so the comparison
+    // cannot trip -Wsign-compare (Rule 73: no fragile encodings).
+    uint32_t iterations = 0;
     while (changed) {
         changed = false;
-        if (++iterations > 10) break;
+        if (++iterations > constants::kValueFlowMaxFixpointIterations) break;
         for (NodeId id = 0; id < g.size(); ++id) {
             const Node& n = g[id];
             if (n.flags.has(NodeFlagBit::IsDead)) continue;

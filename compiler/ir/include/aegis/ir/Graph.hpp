@@ -63,6 +63,20 @@ public:
     [[nodiscard]] std::span<const Node>      nodes() const noexcept { return nodes_; }
     [[nodiscard]] std::span<OutputList>       outputs()       noexcept { return outputs_; }
     [[nodiscard]] std::span<const OutputList> outputs() const noexcept { return outputs_; }
+    // Stable COPY of a node's user list. REQUIRED whenever the loop
+    // body mutates output lists (swap_input / set_input /
+    // append_input) or creates nodes (make_* may reallocate the
+    // outputs vector): iterating the LIVE view while it is mutated
+    // reads shifted slots and corrupts the use-def map — exactly the
+    // iterate-and-mutate defect the Rule 42 verifier catches as
+    // "node N listed as output of M but does not have it as input"
+    // (Rules 62/73).
+    [[nodiscard]] SmallVector<NodeId, 8> users_snapshot(NodeId n) const {
+        SmallVector<NodeId, 8> out;
+        if (n >= outputs_.size()) return out;
+        for (NodeId u : outputs_[n].view()) out.push_back(u);
+        return out;
+    }
     [[nodiscard]] uint32_t size() const noexcept { return static_cast<uint32_t>(nodes_.size()); }
     [[nodiscard]] SymbolTable* syms() noexcept { return syms_; }
     [[nodiscard]] const SymbolTable* syms() const noexcept { return syms_; }
@@ -108,6 +122,14 @@ public:
     void swap_input(NodeId n, NodeId old_in, NodeId new_in);
     // Replaces the i-th input of `n` with `new_in`. Updates output lists.
     void set_input(NodeId n, size_t i, NodeId new_in);
+    // Appends `new_in` as an additional (last) input of `n` and links
+    // the reverse output edge. Used when a pass attaches a FrameState
+    // (or similar witness) node to an existing node — the edge keeps
+    // the witness alive for liveness-based sweeps and visible to the
+    // verifier. The node's payload is NOT touched (Rule 62: never
+    // clobber a payload slot that carries meaning, e.g. a call's
+    // callee SymbolId).
+    void append_input(NodeId n, NodeId new_in);
     // Removes a node from the IR (marks it Dead; the sweep pass actually
     // frees the slot). Ids of *other* nodes are stable.
     void mark_dead(NodeId n) noexcept;

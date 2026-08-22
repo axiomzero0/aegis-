@@ -77,7 +77,9 @@ int CopyPropagationPass::run(Graph& g, const PassBudget& budget) {
             }
         }
         if (replacement != kInvalidNodeId) {
-            for (NodeId user : g.outputs()[id].view()) {
+            // Snapshot: swap_input mutates this output list
+            // mid-iteration (Rule 62/73 — see Graph::users_snapshot).
+            for (NodeId user : g.users_snapshot(id)) {
                 g.swap_input(user, id, replacement);
             }
             n.flags.set(NodeFlagBit::IsDead);

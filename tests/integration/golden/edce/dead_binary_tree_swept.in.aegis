@@ -1,0 +1,7 @@
+fn f(a: i32, b: i32) -> i32 {
+    let t = (a + b) * (a - b);
+    return a;
+}
+fn main() -> i32 {
+    return f(3, 4);
+}

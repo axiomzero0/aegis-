@@ -1,0 +1,8 @@
+fn f(a: i32, b: i32) -> i32 {
+    let p = a < b;
+    let q = a < b;
+    return p + q;
+}
+fn main() -> i32 {
+    return f(1, 2);
+}

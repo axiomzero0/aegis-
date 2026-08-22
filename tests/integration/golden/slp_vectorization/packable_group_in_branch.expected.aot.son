@@ -1,0 +1,46 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Parameter (Pure) sym=5 ins=[]
+n5 : Parameter (Pure) sym=6 ins=[]
+n6 : Parameter (Pure) sym=7 ins=[]
+n7 : Parameter (Pure) sym=8 ins=[]
+n8 : Parameter (Pure) sym=9 ins=[]
+n9 : Parameter (Pure) sym=10 ins=[]
+n10 : Parameter (Pure) sym=11 ins=[]
+n11 : Parameter (Pure) sym=12 ins=[]
+n12 : Constant (Pure) value=0 ins=[]
+n13 : CmpGt (Pure) ins=[3,12]
+n14 : If (Pure) ins=[1,13]
+n15 : Proj (Pure) proj=0 ins=[14]
+n16 : Proj (Pure) proj=1 ins=[14]
+n17 : Add (Pure) ins=[4,5]
+n18 : Add (Pure) ins=[6,7]
+n19 : Add (Pure) ins=[17,18]
+n20 : Add (Pure) ins=[8,9]
+n21 : Add (Pure) ins=[19,20]
+n22 : Add (Pure) ins=[10,11]
+n23 : Add (Pure) ins=[21,22]
+n24 : Return (Pure) ins=[15,2,23]
+n25 : Region (Pure) ins=[_,16] DEAD
+n26 : Constant (Pure) value=0 ins=[] DEAD
+n27 : Return (Pure) ins=[16,2,12]
+n28 : Proj (Pure) proj=0 ins=[0] DEAD
+n29 : Proj (Pure) proj=1 ins=[0] DEAD
+n30 : Constant (Pure) value=1 ins=[]
+n31 : Constant (Pure) value=1 ins=[] DEAD
+n32 : Constant (Pure) value=2 ins=[]
+n33 : Constant (Pure) value=3 ins=[]
+n34 : Constant (Pure) value=4 ins=[]
+n35 : Constant (Pure) value=5 ins=[]
+n36 : Constant (Pure) value=6 ins=[]
+n37 : Constant (Pure) value=7 ins=[]
+n38 : Constant (Pure) value=8 ins=[]
+n39 : CallAltered (Altered) callee=sym2 ins=[1,2,30,30,32,33,34,35,36,37,38]
+n40 : Proj (Pure) proj=0 ins=[39]
+n41 : Return (Pure) ins=[1,39,40]
+n42 : Proj (Pure) proj=1 ins=[0] DEAD
+n43 : Proj (Pure) proj=1 ins=[0] DEAD
+n44 : Proj (Pure) proj=1 ins=[0] DEAD

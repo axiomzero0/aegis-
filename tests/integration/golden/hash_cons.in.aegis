@@ -1,7 +1,0 @@
-fn hash_cons() -> i32 {
-    let a = 1;
-    let b = 2;
-    let c = a + b;
-    let d = a + b;
-    return c;
-}
