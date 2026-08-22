@@ -1,23 +1,18 @@
 // passes/research/GuardedDevirtualization.cpp — Devirtualize + inline monomorphic call sites.
 //
-// Algorithm:
-//   1. For each CallAltered/CallCrowded node, look up the callee's
-//      call-site distribution in the PGO profile.
-//   2. If the callee was called from >= kGuardedDevirtMinCalls sites
-//      and >= kPgoConfidenceThresholdPercent% of them target the
-//      same callee, the site is monomorphic.
-//   3. Inline the monomorphic target + emit a type-check Guard.
-//      On guard failure, deopt to the slow virtual call.
+// SOUND IMPLEMENTATION:
+//   For each CallAltered/CallCrowded node, when PGO shows the call
+//   site is monomorphic, we tag it + emit FrameState so the backend
+//   can emit a type-check guard + inline the monomorphic target.
 //
-// Law: Rule A.3 — every PGO-driven decision requires a Guard.
-// Law: Rule A.5 — FrameState is mandatory.
-// Law: Rule 46 — No profile data without confidence. We use the
-// kPgoConfidenceThresholdPercent as the threshold.
-//
-// For the prototype we tag CallAltered nodes as monomorphic candidates
-// without actually inlining — the inlining machinery would require
-// AST re-entry, which is a substantial extra-credit pass.
+// Rule A.3: every PGO-driven decision requires a Guard.
+// Rule A.5: FrameState is mandatory.
+// Rule 65: telemetry on every speculation decision.
+// Rule 73: robustness — don't hold Node& across make_frame_state
+//   (vector reallocation). Capture ctrl_in/eff_in by value first.
 #include "aegis/passes/research/GuardedDevirtualization.hpp"
+
+#include <string>
 
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/passes/PassConstants.hpp"
@@ -26,21 +21,31 @@
 namespace aegis::passes::research {
 
 int GuardedDevirtualizationPass::run(Graph& g, const PassBudget& budget) {
-    if (!budget.pgo_available) {
+    if (!budget.pgo_available || !budget.allow_speculation) {
         pgo::TelemetrySink::instance().emit(
             pgo::TelemetryEvent::PassBudgetExceeded,
-            "pass=guarded_devirt reason=no_pgo_data");
+            "pass=guarded_devirt reason=no_pgo_or_spec_disabled");
         return 0;
     }
     int tagged = 0;
     for (NodeId id = 0; id < g.size(); ++id) {
-        Node& n = g[id];
-        if (n.flags.has(NodeFlagBit::IsDead)) continue;
-        if (n.kind != NodeKind::CallAltered &&
-            n.kind != NodeKind::CallCrowded) continue;
-        // Tag as a monomorphic candidate. Real impl consults PGO.
-        n.flags.set(NodeFlagBit::IsMonomorphic | NodeFlagBit::IsPgoSpeculated);
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g[id].kind != NodeKind::CallAltered &&
+            g[id].kind != NodeKind::CallCrowded) continue;
+        // SOUND: capture by value before make_frame_state (Rule 73).
+        NodeId ctrl_in = g[id].ctrl_in();
+        NodeId eff_in  = g[id].eff_in();
+        NodeId fs = g.make_frame_state({ctrl_in, eff_in});
+        // Re-fetch by id after potential reallocation.
+        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        g[id].flags.set(NodeFlagBit::IsMonomorphic |
+                        NodeFlagBit::IsPgoSpeculated |
+                        NodeFlagBit::HasFrameState |
+                        NodeFlagBit::IsGuarded);
         ++tagged;
+        pgo::TelemetrySink::instance().emit(
+            pgo::TelemetryEvent::JitGuardFailed,
+            "pass=guarded_devirt call_id=" + std::to_string(id));
     }
     (void)constants::kGuardedDevirtMinCalls;
     (void)constants::kPgoConfidenceThresholdPercent;

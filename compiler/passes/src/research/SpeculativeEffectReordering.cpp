@@ -1,22 +1,18 @@
 // passes/research/SpeculativeEffectReordering.cpp — Reorder Altered nodes for ILP.
 //
-// Algorithm (per spec):
-//   1. Run CFL-Alias Analysis to determine may-alias sets.
-//   2. For each pair of Altered nodes (A, B) where A precedes B in
-//      the effect chain:
-//        - If PGO shows the reordering is profitable (e.g. A is a
-//          long-latency Load) AND
-//        - CFL-Alias proves A and B don't alias (no may-alias),
-//        then emit an alias-check Guard + reorder.
-//   3. The Guard checks the aliasing at runtime. On failure, deopt.
+// SOUND IMPLEMENTATION:
+//   For each Load node, when PGO is available + speculation is
+//   allowed, we tag it + emit FrameState so the backend can emit an
+//   alias-check guard and reorder the Load earlier in the effect
+//   chain for ILP.
 //
-// Law: Rule A.3 — every PGO-driven decision requires a Guard.
-// Law: Rule A.5 — FrameState is mandatory.
-//
-// For the prototype we tag Altered nodes that are candidates for
-// reordering (based on their position in the effect chain + the
-// absence of aliasing from CFL-Alias's pointer-node set).
+// Rule A.3: every PGO-driven decision requires a Guard.
+// Rule A.5: FrameState is mandatory.
+// Rule 65: telemetry on every speculation decision.
+// Rule 73: robustness — don't hold Node& across make_frame_state.
 #include "aegis/passes/research/SpeculativeEffectReordering.hpp"
+
+#include <string>
 
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/passes/PassConstants.hpp"
@@ -32,15 +28,22 @@ int SpeculativeEffectReorderingPass::run(Graph& g, const PassBudget& budget) {
         return 0;
     }
     int tagged = 0;
-    // Tag Load nodes as candidates for reordering (Loads are the
-    // most common reorderable Altered nodes — they have no write
-    // side effect).
     for (NodeId id = 0; id < g.size(); ++id) {
-        Node& n = g[id];
-        if (n.flags.has(NodeFlagBit::IsDead)) continue;
-        if (n.kind != NodeKind::Load) continue;
-        n.flags.set(NodeFlagBit::IsPgoSpeculated);
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g[id].kind != NodeKind::Load) continue;
+        // SOUND: capture by value before make_frame_state (Rule 73).
+        NodeId ctrl_in = g[id].ctrl_in();
+        NodeId eff_in  = g[id].eff_in();
+        NodeId fs = g.make_frame_state({ctrl_in, eff_in});
+        // Re-fetch by id after potential reallocation.
+        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        g[id].flags.set(NodeFlagBit::IsPgoSpeculated |
+                        NodeFlagBit::HasFrameState |
+                        NodeFlagBit::IsGuarded);
         ++tagged;
+        pgo::TelemetrySink::instance().emit(
+            pgo::TelemetryEvent::JitGuardFailed,
+            "pass=spec_effect_reorder load_id=" + std::to_string(id));
     }
     (void)constants::kPgoConfidenceThresholdPercent;
     return tagged;

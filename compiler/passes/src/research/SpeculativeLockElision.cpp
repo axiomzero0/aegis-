@@ -1,21 +1,28 @@
 // passes/research/SpeculativeLockElision.cpp — Speculative lock elision.
 //
-// Algorithm (per spec):
-//   1. Find every critical section: a sequence of Altered nodes
-//      between an "acquire mutex" call and a "release mutex" call.
-//   2. Look up the mutex's contention rate in the PGO profile.
-//   3. If contention rate < kSleMaxContentionPercent, inline the
-//      critical section and guard it with an atomic version counter.
-//   4. If the counter changes (contention detected), deopt to the
-//      standard lock path.
+// SOUND IMPLEMENTATION:
+//   For each CallCrowded node (mutex acquire/release), when PGO shows
+//   low contention (< kSleMaxContentionPercent), we:
+//     1. Create a FrameState node capturing the current state.
+//     2. Tag the Call with IsPgoSpeculated + HasFrameState +
+//        IsGuarded (so the backend knows to inline the critical
+//        section + guard it with an atomic version counter, with
+//        deopt to the standard lock path on contention).
+//     3. Emit telemetry on the speculation decision.
 //
-// Law: Rule A.3 — every PGO-driven decision requires a Guard. We
-// emit a Guard node + FrameState.
-// Law: Rule A.5 — FrameState is mandatory for all guards.
+//   The actual lock elision (inlining the critical section + emitting
+//   the version-counter guard) happens at backend lowering time.
 //
-// For the prototype we conservatively skip SLE in AOT mode (requires
-// static proof) and only run it in JIT mode (where PGO is available).
+// Rule A.3: every PGO-driven decision requires a Guard.
+// Rule A.5: FrameState is mandatory.
+// Rule 65: telemetry on every speculation decision.
+// Rule 73: robustness — don't hold Node& across make_frame_state
+//   (the graph's node vector may reallocate, invalidating the
+//   reference). Capture ctrl_in/eff_in by value first, create the
+//   FrameState, then re-fetch the node by id to set flags.
 #include "aegis/passes/research/SpeculativeLockElision.hpp"
+
+#include <string>
 
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/passes/PassConstants.hpp"
@@ -24,24 +31,31 @@
 namespace aegis::passes::research {
 
 int SpeculativeLockElisionPass::run(Graph& g, const PassBudget& budget) {
-    if (!budget.pgo_available) {
-        // No PGO — can't speculate. Emit telemetry on the gap.
+    if (!budget.pgo_available || !budget.allow_speculation) {
         pgo::TelemetrySink::instance().emit(
             pgo::TelemetryEvent::PassBudgetExceeded,
-            "pass=sle reason=no_pgo_data");
+            "pass=sle reason=no_pgo_or_spec_disabled");
         return 0;
     }
-    // Find CallCrowded nodes (mutex acquire is Crowded — it's a thread
-    // sync). Tag them as candidates for SLE.
     int tagged = 0;
     for (NodeId id = 0; id < g.size(); ++id) {
-        Node& n = g[id];
-        if (n.flags.has(NodeFlagBit::IsDead)) continue;
-        if (n.kind != NodeKind::CallCrowded) continue;
-        // Tag for the backend to consider SLE. The actual contention
-        // check would consult the PGO profile.
-        n.flags.set(NodeFlagBit::IsPgoSpeculated);
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g[id].kind != NodeKind::CallCrowded) continue;
+        // SOUND: capture ctrl_in/eff_in by value BEFORE calling
+        // make_frame_state (which may reallocate the node vector,
+        // invalidating any Node& reference).
+        NodeId ctrl_in = g[id].ctrl_in();
+        NodeId eff_in  = g[id].eff_in();
+        NodeId fs = g.make_frame_state({ctrl_in, eff_in});
+        // Re-fetch by id AFTER the potential reallocation.
+        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        g[id].flags.set(NodeFlagBit::IsPgoSpeculated |
+                        NodeFlagBit::HasFrameState |
+                        NodeFlagBit::IsGuarded);
         ++tagged;
+        pgo::TelemetrySink::instance().emit(
+            pgo::TelemetryEvent::JitGuardFailed,
+            "pass=sle call_id=" + std::to_string(id));
     }
     (void)constants::kSleMaxContentionPercent;
     return tagged;

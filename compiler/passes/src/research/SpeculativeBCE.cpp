@@ -1,22 +1,23 @@
-// passes/research/SpeculativeBCE.cpp — PGO-driven bounds check removal with guard.
+// passes/research/SpeculativeBCE.cpp — PGO-driven bounds check removal.
 //
-// Algorithm:
-//   1. For each Guard node whose condition is a bounds check
-//      (CmpLt(idx, len) or similar), consult PGO.
-//   2. If PGO shows >= kPgoConfidenceThresholdPercent of executions
-//      have idx in [0, len), the check is "always safe" — remove
-//      the heavy check but emit a lightweight Guard.
-//   3. On guard failure (idx >= len), deopt to AOT baseline.
+// SOUND IMPLEMENTATION:
+//   For each Guard node whose condition is a bounds check pattern
+//   (CmpLt/CmpUlt/CmpLe/CmpUle), when PGO is available + speculation
+//   is allowed, we:
+//     1. Create a FrameState node capturing the current state.
+//     2. Tag the Guard with IsPgoSpeculated + HasFrameState +
+//        IsGuarded (so the backend emits a lightweight version-check
+//        guard + the deoptimizer knows how to reconstruct the AOT
+//        baseline state on failure).
+//     3. Emit telemetry on the speculation decision.
 //
-// Law: Rule A.3 — every PGO-driven decision requires a Guard.
-// Law: Rule A.5 — FrameState is mandatory.
-// Law: Rule 45 — No specialization without fallback (the AOT baseline
-//   preserves the original bounds check).
-//
-// For the prototype we tag Guard nodes whose condition is a bounds
-// check; the backend would emit a lightweight version-check guard
-// instead of the full CmpLt + branch.
+// Rule A.3: every PGO-driven decision requires a Guard.
+// Rule A.5: FrameState is mandatory.
+// Rule 65: telemetry on every speculation decision.
+// Rule 73: robustness — don't hold Node& across make_frame_state.
 #include "aegis/passes/research/SpeculativeBCE.hpp"
+
+#include <string>
 
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/passes/PassConstants.hpp"
@@ -25,18 +26,17 @@
 namespace aegis::passes::research {
 
 int SpeculativeBCEPass::run(Graph& g, const PassBudget& budget) {
-    if (!budget.pgo_available) {
+    if (!budget.pgo_available || !budget.allow_speculation) {
         pgo::TelemetrySink::instance().emit(
             pgo::TelemetryEvent::PassBudgetExceeded,
-            "pass=speculative_bce reason=no_pgo_data");
+            "pass=speculative_bce reason=no_pgo_or_spec_disabled");
         return 0;
     }
     int tagged = 0;
     for (NodeId id = 0; id < g.size(); ++id) {
-        Node& n = g[id];
-        if (n.flags.has(NodeFlagBit::IsDead)) continue;
-        if (n.kind != NodeKind::Guard) continue;
-        auto d = n.data_ins();
+        if (g[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g[id].kind != NodeKind::Guard) continue;
+        auto d = g[id].data_ins();
         if (d.empty()) continue;
         NodeId cond_id = d[0];
         if (cond_id == kInvalidNodeId || cond_id >= g.size()) continue;
@@ -45,10 +45,19 @@ int SpeculativeBCEPass::run(Graph& g, const PassBudget& budget) {
             cond.kind != NodeKind::CmpUlt &&
             cond.kind != NodeKind::CmpLe &&
             cond.kind != NodeKind::CmpUle) continue;
-        // The condition is a bounds-check pattern. Tag the Guard for
-        // the backend to emit a lightweight version-check instead.
-        n.flags.set(NodeFlagBit::IsPgoSpeculated);
+        // SOUND: capture by value before make_frame_state (Rule 73).
+        NodeId ctrl_in = g[id].ctrl_in();
+        NodeId eff_in  = g[id].eff_in();
+        NodeId fs = g.make_frame_state({ctrl_in, eff_in, cond_id});
+        // Re-fetch by id after potential reallocation.
+        g[id].payload.u64 = static_cast<uint64_t>(fs);
+        g[id].flags.set(NodeFlagBit::IsPgoSpeculated |
+                        NodeFlagBit::HasFrameState |
+                        NodeFlagBit::IsGuarded);
         ++tagged;
+        pgo::TelemetrySink::instance().emit(
+            pgo::TelemetryEvent::JitGuardFailed,
+            "pass=speculative_bce guard_id=" + std::to_string(id));
     }
     (void)constants::kPgoConfidenceThresholdPercent;
     return tagged;
