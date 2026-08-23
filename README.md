@@ -32,10 +32,15 @@ green:
   BOLTLayout) — appended to the unified pipeline via `aegisc --research`
   (Rule A.1: one pipeline, two inputs; speculative members no-op in
   AOT mode and install guard + FrameState in JIT mode).
-- **`compiler/backend/`** — `MachineIR`, `InstrSel` (SoN → MachineInstr),
-  `LinearScan` (Phase 1 register allocator per the spec), `Target`
-  (abstract target interface for x86/ARM), `Emitter` (machine code
-  emission + real ELF64 object file writing), `ElfConstants`
+- **`compiler/backend/`** — `MachineIR`, `InstrSel` (SoN → MachineInstr,
+  with a topological scheduler so folded constants never emit after
+  their uses, plus immediate-folding for constant shift counts and a
+  dead-instruction sweep), `LinearScan` (Phase 1 register allocator
+  per the spec), `ExecEncoder` (real x86-64 encodings — full integer
+  ALU/div/shift/setcc set, SysV parameter parallel-move with RAX
+  cycle staging, callee-saved prologue — producing directly
+  executable bytes), `Target` (abstract target interface for x86/ARM),
+  `Emitter` (real ELF64 object file writing), `ElfConstants`
   (named ELF ABI constants per Rule D.1/D.2),
   `RegAlloc/RegAllocInterface` for plugging in alternative allocators.
 - **`compiler/jit/`** — `JitEngine` (hotness tracking + background

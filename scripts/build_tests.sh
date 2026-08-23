@@ -100,6 +100,7 @@ RESEARCH_SRC=(
 BACKEND_SRC=(
     "$ROOT/compiler/backend/src/RegAlloc/LinearScan.cpp"
     "$ROOT/compiler/backend/src/x86/InstrSel_x86.cpp"
+    "$ROOT/compiler/backend/src/x86/ExecEncoder.cpp"
 )
 
 # Per-test dependencies.
@@ -118,6 +119,11 @@ PGO_SRC=(
 )
 RUNTIME_IO_SRC=(
     "$ROOT/runtime/io/src/syscall.cpp"
+)
+
+# ---- Shared compile-once object set ----
+JIT_SRC=(
+    "$ROOT/compiler/jit/src/MemManager.cpp"
 )
 
 # ---- Shared compile-once object set ----
@@ -164,9 +170,12 @@ build_test test_sound_rewrites "$UNIT/test_sound_rewrites.cpp"
 build_test test_loop_speculative "$UNIT/test_loop_speculative.cpp"
 
 build_test test_for_loops "$UNIT/test_for_loops.cpp"
+build_test test_exec_codegen "$UNIT/test_exec_codegen.cpp" "${JIT_SRC[@]}"
 
 # Rule 36 regression suite (tests/regression/).
 build_test test_regression "$REGRESSION/test_regression.cpp"
 
-# Rule 41 perf suite (tests/perf/).
+# Rule 41 perf suites (tests/perf/): compile-time pipeline + runtime
+# generated-code execution (needs the JIT MemManager).
 build_test bench_pipeline "$PERF/bench_pipeline.cpp"
+build_test bench_runtime "$PERF/bench_runtime.cpp" "${JIT_SRC[@]}"

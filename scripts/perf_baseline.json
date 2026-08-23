@@ -1,13 +1,18 @@
 {
-  "captured": "2026-08-23T02:42:31.530861+00:00",
-  "reason": "Initial loop-capability baseline: adds loop_heavy case; loop body walk fixed from guard-counted (320ms) to visited-set (0.64ms) per Rule 41",
+  "captured": "2026-08-23T08:08:29.230947+00:00",
+  "reason": "Full two-half Rule 41 baseline: compile-time cases (bench_pipeline) + runtime generated-code cases rt_* (bench_runtime through ExecEncoder + JIT MemManager). Supersedes single-binary capture.",
   "threshold_percent": 5.0,
   "cases": {
-    "branchy": 257.132,
-    "chain_fold": 203.559,
-    "dedup_heavy": 206.559,
-    "loop_heavy": 681.138,
-    "multi_fn": 318.091,
-    "wide_fold": 184.481
+    "branchy": 265.168,
+    "chain_fold": 192.93,
+    "dedup_heavy": 211.966,
+    "loop_heavy": 652.512,
+    "multi_fn": 316.787,
+    "rt_chain64": 2773.235,
+    "rt_identity": 572.617,
+    "rt_mixed": 1770.663,
+    "rt_poly32": 3823.407,
+    "rt_wide8": 744.56,
+    "wide_fold": 189.346
   }
 }

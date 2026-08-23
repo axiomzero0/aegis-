@@ -10,6 +10,11 @@
 namespace aegis {
 
 namespace {
+/// Bits per byte — bounds the x86-64 shift-count immediate to the
+/// architectural range [0, 63] (Rule D.1: named, not a literal).
+constexpr int64_t g_BitsPerByte{8};
+/// DFS states for the topological scheduler.
+constexpr uint8_t g_VisitNew{0}, g_VisitOnStack{1}, g_VisitDone{2};
 // Mnemonic for a binary op. Returns nullptr when the kind has no
 // machine mapping — callers must SKIP the instruction rather than
 // emit a wrong opcode (Rule D.3: no silent fallback to "mov").
@@ -43,6 +48,9 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
     MachineFunction mf;
     mf.name = std::string(fn_name);
     VRegId next_vreg = 0;
+    // ABI argument index for Parameter nodes (this function's params,
+    // counted in node order = signature order).
+    uint32_t param_count_ = 0;
     // Assign one VReg per data-producing node.
     std::vector<VRegId> vreg_per_node(g_.size(), kInvalidVReg);
     auto get_or_assign = [&](NodeId id) -> VRegId {
@@ -52,6 +60,9 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
         return v;
     };
 
+    // Collect one MachineInstr per emittable node; scheduling happens
+    // AFTER collection (topological order — see below).
+    std::vector<std::pair<NodeId, MachineInstr>> per_node;
     for (NodeId id = 0; id < g_.size(); ++id) {
         const Node& n = g_[id];
         if (n.flags.has(NodeFlagBit::IsDead)) continue;
@@ -67,7 +78,7 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 // slot made it allocate gigabytes (std::bad_alloc).
                 mi.has_imm = true;
                 mi.imm = n.payload.i64;
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
                 break;
             }
             case NodeKind::Neg:
@@ -84,7 +95,7 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 mi.defs[0] = get_or_assign(id);
                 auto data = n.data_ins();
                 if (!data.empty()) mi.uses[0] = get_or_assign(data[0]);
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
                 break;
             }
             case NodeKind::Add: case NodeKind::Sub: case NodeKind::Mul:
@@ -103,8 +114,29 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 mi.defs[0] = get_or_assign(id);
                 auto data = n.data_ins();
                 if (data.size() >= 1) mi.uses[0] = get_or_assign(data[0]);
+                // Shifts by a CONSTANT amount fold into the immediate
+                // form (x86 C1 /n ib) — no vreg + mov_imm for the
+                // count. Runtime-amount shifts keep the vreg operand
+                // (the executable encoder rejects those loudly; the
+                // corpus/IR constant-folds them).
+                const bool is_shift = n.kind == NodeKind::Shl ||
+                                      n.kind == NodeKind::Shr ||
+                                      n.kind == NodeKind::LShr;
+                if (is_shift && data.size() >= 2 &&
+                    data[1] != kInvalidNodeId && data[1] < g_.size() &&
+                    g_[data[1]].kind == NodeKind::Constant) {
+                    const int64_t amount = g_[data[1]].payload.i64;
+                    if (amount >= 0 && amount <
+                            static_cast<int64_t>(sizeof(int64_t) *
+                                                 g_BitsPerByte)) {
+                        mi.has_imm = true;
+                        mi.imm = amount;
+                        per_node.emplace_back(id, mi);
+                        break;
+                    }
+                }
                 if (data.size() >= 2) mi.uses[1] = get_or_assign(data[1]);
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
                 break;
             }
             case NodeKind::Load: {
@@ -113,7 +145,7 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 mi.defs[0] = get_or_assign(id);
                 auto data = n.data_ins();
                 if (!data.empty()) mi.uses[0] = get_or_assign(data[0]);
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
                 break;
             }
             case NodeKind::Store: {
@@ -122,7 +154,22 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 auto data = n.data_ins();
                 if (data.size() >= 1) mi.uses[0] = get_or_assign(data[0]);
                 if (data.size() >= 2) mi.uses[1] = get_or_assign(data[1]);
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
+                break;
+            }
+            case NodeKind::Parameter: {
+                // ABI entry pseudo-instruction: defs[0] = the vreg that
+                // carries this parameter, imm = the argument index.
+                // The emitter lowers it to `mov <home>, <abi arg reg>`
+                // (SysV: RDI, RSI, RDX, RCX, R8, R9). Parameters are
+                // created in signature order, so the running count IS
+                // the ABI index (Rule 53: node order = signature order).
+                MachineInstr mi;
+                mi.op = "param";
+                mi.defs[0] = get_or_assign(id);
+                mi.has_imm = true;
+                mi.imm = static_cast<int64_t>(param_count_++);
+                per_node.emplace_back(id, mi);
                 break;
             }
             case NodeKind::Return: {
@@ -137,12 +184,123 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                     mi.uses[0] = get_or_assign(
                         n.inputs[ir::shape::kReturnValIndex]);
                 }
-                mf.instrs.push_back(mi);
+                per_node.emplace_back(id, mi);
                 break;
             }
             default:
                 // Skip structural / effect nodes for now.
                 break;
+        }
+    }
+    // ---- Schedule: emit in GRAPH TOPOLOGICAL ORDER. ----
+    //
+    // Node-id order is NOT topological after the mid-level passes:
+    // SCCP appends folded constants at the END of the id space and
+    // rewires earlier nodes to use them, so id order can place a use
+    // before its def (observed as a garbage read at runtime — the
+    // differential harness caught it). A post-order DFS over each
+    // emittable node's INPUT edges emits every operand before its
+    // consumer; `ret` sinks last. LinearScan then computes intervals
+    // over this clean stream.
+    {
+        // instr index per node id (only for collected nodes).
+        std::vector<int64_t> instr_of(g_.size(), -1);
+        for (size_t k = 0; k < per_node.size(); ++k) {
+            instr_of[per_node[k].first] = static_cast<int64_t>(k);
+        }
+        std::vector<uint8_t> state(g_.size(), 0); // 0=new 1=on-stack 2=done
+        // Explicit stack: (node, inputs_pushed). Rule 73: no recursion
+        // depth limits.
+        struct Frame { NodeId node; bool expanded; };
+        std::vector<Frame> stack;
+        for (auto& [node_id, mi] : per_node) {
+            (void)mi;
+            if (state[node_id] != 0) continue;
+            stack.push_back(Frame{node_id, false});
+            while (!stack.empty()) {
+                Frame& top = stack.back();
+                if (!top.expanded) {
+                    if (state[top.node] == g_VisitDone) { stack.pop_back(); continue; }
+                    state[top.node] = g_VisitOnStack;
+                    // Mark expanded BEFORE any push_back — pushing may
+                    // reallocate the vector and dangle `top` (Rule 73).
+                    top.expanded = true;
+                    // Push DATA inputs that carry instrs (ctrl/eff
+                    // nodes have none; their instrs, if any, are
+                    // self-contained). Inputs are pushed LAST-to-FIRST
+                    // so the stack pops them FIRST-to-LAST: operands
+                    // emit in source order (left-to-right), keeping
+                    // right-hand constants just-in-time instead of
+                    // live across the whole expression (the naive
+                    // order made all of a 64-term chain's constants
+                    // live at once and spilled).
+                    bool pushed_any = false;
+                    const auto& ins = g_[top.node].inputs;
+                    for (size_t k = ins.size(); k-- > 0;) {
+                        NodeId in = ins[k];
+                        if (in == kInvalidNodeId || in >= g_.size()) continue;
+                        if (instr_of[in] == -1) continue;      // no instr
+                        if (state[in] != 0) continue;          // visited
+                        stack.push_back(Frame{in, false});
+                        pushed_any = true;
+                    }
+                    if (!pushed_any) {
+                        // Leaf: emit now (no pushes happened, `top` is
+                        // still valid).
+                        mf.instrs.push_back(per_node[static_cast<size_t>(
+                            instr_of[top.node])].second);
+                        state[top.node] = g_VisitDone;
+                        stack.pop_back();
+                    }
+                    continue;
+                }
+                // Expanded: all children processed when control returns
+                // here — emit and finish. (No push happens on this
+                // path, so `top` is stable.)
+                mf.instrs.push_back(per_node[static_cast<size_t>(
+                    instr_of[top.node])].second);
+                state[top.node] = g_VisitDone;
+                stack.pop_back();
+            }
+        }
+        // ---- Dead-instruction sweep. ----
+        //
+        // Selection folds constant shift amounts into the immediate
+        // form, leaving the shift-count Constant node selected as a
+        // `mov_imm` whose vreg has NO users. Emitting it would write a
+        // register the allocator never reserved (default preg 0) and
+        // silently clobber a live value — observed as a wrong runtime
+        // result by the differential harness. Any instr whose def has
+        // no remaining users (and is not `ret`) is dead: drop it.
+        {
+            std::vector<uint8_t> used(next_vreg, 0);
+            for (const auto& mi : mf.instrs) {
+                for (VRegId u : mi.uses) {
+                    if (u != kInvalidVReg && u < used.size()) used[u] = 1;
+                }
+            }
+            std::vector<MachineInstr> live;
+            live.reserve(mf.instrs.size());
+            for (auto& mi : mf.instrs) {
+                if (mi.op != "ret" && mi.defs[0] != kInvalidVReg &&
+                    mi.defs[0] < used.size() && used[mi.defs[0]] == 0) {
+                    continue; // dead def: never emitted
+                }
+                live.push_back(std::move(mi));
+            }
+            mf.instrs = std::move(live);
+        }
+
+        // Cycle guard (Rule D.3): every emittable instr must have been
+        // scheduled. A use cycle in straight-line SSA is a compiler
+        // bug — abort loudly rather than emit wrong code.
+        if (mf.instrs.size() > per_node.size()) {
+            std::fprintf(stderr,
+                         "instrsel: scheduling left %zu of %zu instrs "
+                         "unscheduled (use cycle?)\n",
+                         per_node.size() - mf.instrs.size(),
+                         per_node.size());
+            std::abort();
         }
     }
     return mf;

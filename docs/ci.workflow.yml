@@ -83,9 +83,10 @@ jobs:
       - name: Rule 38 — differential testing (reference/AOT/JIT)
         run: python3 tests/integration/run_differential.py --count "${AEGIS_DIFFERENTIAL_COUNT}"
 
-      - name: Rule 41 — perf benchmarks + regression gate
+      - name: Rule 41 — perf benchmarks + regression gate (compile + runtime)
         run: |
           ./build/bench_pipeline
+          ./build/bench_runtime
           python3 scripts/check_perf.py
 
       - name: Rule 61/D.1 — magic-number scan

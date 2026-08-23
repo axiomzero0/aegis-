@@ -71,6 +71,7 @@ add_library(aegis_core STATIC
     backend/src/x86/InstrSel_x86.cpp
     backend/src/x86/Target_x86.cpp
     backend/src/x86/Emitter_x86.cpp
+    backend/src/x86/ExecEncoder.cpp
     backend/src/SSAConstruction.cpp
     backend/src/Peephole.cpp
     backend/src/FrameLayout.cpp

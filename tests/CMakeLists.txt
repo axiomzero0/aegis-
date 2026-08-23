@@ -13,6 +13,13 @@ add_executable(aegis_for_loop_tests unit/test_for_loops.cpp)
 target_link_libraries(aegis_for_loop_tests PRIVATE aegis_core aegis_pgo
                                                    aegis_compile_options)
 add_test(NAME aegis_for_loop_tests COMMAND aegis_for_loop_tests)
+
+# Rule 36 regression suite for the executable-codegen path.
+add_executable(aegis_exec_codegen_tests unit/test_exec_codegen.cpp)
+target_link_libraries(aegis_exec_codegen_tests PRIVATE aegis_core aegis_pgo
+                                                       aegis_jit
+                                                       aegis_compile_options)
+add_test(NAME aegis_exec_codegen_tests COMMAND aegis_exec_codegen_tests)
 target_link_libraries(aegis_unit_tests PRIVATE aegis_core aegis_compile_options)
 add_test(NAME aegis_unit_tests COMMAND aegis_unit_tests)
 
@@ -28,6 +35,16 @@ target_link_libraries(aegis_perf_benchmarks PRIVATE aegis_core aegis_pgo
                                                     aegis_compile_options)
 add_test(NAME aegis_perf_benchmarks COMMAND aegis_perf_benchmarks)
 set_tests_properties(aegis_perf_benchmarks PROPERTIES LABELS "perf")
+
+# Rule 41 (runtime half) + Rule 38 (runtime differential): executes
+# generated x86-64 through the JIT MemManager and checks it against
+# the AST interpreter.
+add_executable(aegis_runtime_benchmarks perf/bench_runtime.cpp)
+target_link_libraries(aegis_runtime_benchmarks PRIVATE aegis_core aegis_pgo
+                                                      aegis_jit
+                                                      aegis_compile_options)
+add_test(NAME aegis_runtime_benchmarks COMMAND aegis_runtime_benchmarks)
+set_tests_properties(aegis_runtime_benchmarks PROPERTIES LABELS "perf")
 
 # ---- Rule 37 golden suite (tests/integration/golden/) ----
 # Discovers every <pass>/<name>.in.aegis pair and registers a

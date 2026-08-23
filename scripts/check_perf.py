@@ -33,7 +33,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BENCH = REPO / "build" / "bench_pipeline"
+# Both halves of the Rule 41 suite: compile-time pipeline and runtime
+# generated-code execution. Each contributes its `bench` lines.
+BENCHES = [REPO / "build" / "bench_pipeline",
+           REPO / "build" / "bench_runtime"]
 BASELINE = REPO / "scripts" / "perf_baseline.json"
 
 #: Rule 41's regression threshold (percent). A regression strictly
@@ -48,23 +51,27 @@ NOISE_FLOOR_PERCENT = 0.25
 
 
 def run_benchmarks() -> dict[str, float]:
-    if not BENCH.exists():
-        print(f"FAIL: benchmark binary not found at {BENCH} "
-              f"(run scripts/build_tests.sh first)", file=sys.stderr)
-        sys.exit(2)
-    proc = subprocess.run([str(BENCH)], capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        print("FAIL: benchmark binary exited non-zero", file=sys.stderr)
-        sys.stderr.write(proc.stderr)
-        sys.exit(2)
     medians: dict[str, float] = {}
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        # Format: "bench <name> <iters> <nodes> <median_us>"
-        # (skip the header row, whose last field is the literal
-        # 'median_us' column label)
-        if len(parts) == 5 and parts[0] == "bench" and parts[4] != "median_us":
-            medians[parts[1]] = float(parts[4])
+    for bench in BENCHES:
+        if not bench.exists():
+            # The runtime bench is optional only when it was never
+            # built; in CI both exist. A missing binary is a loud
+            # failure (Rule D.3), not a skip.
+            print(f"FAIL: benchmark binary not found at {bench} "
+                  f"(run scripts/build_tests.sh first)", file=sys.stderr)
+            sys.exit(2)
+        proc = subprocess.run([str(bench)], capture_output=True, text=True,
+                               timeout=600)
+        if proc.returncode != 0:
+            print(f"FAIL: {bench.name} exited non-zero", file=sys.stderr)
+            sys.stderr.write(proc.stderr)
+            sys.exit(2)
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            # Format: "bench <name> <iters> <nodes> <median_us>"
+            # (skips the header row and informational xref/note lines).
+            if len(parts) == 5 and parts[0] == "bench" and parts[4] != "median_us":
+                medians[parts[1]] = float(parts[4])
     if not medians:
         print("FAIL: could not parse benchmark output", file=sys.stderr)
         sys.exit(2)

@@ -28,7 +28,11 @@ struct LiveInterval {
 
 class LinearScanAllocator {
 public:
-    LinearScanAllocator(MachineFunction& mf, uint16_t num_gpr, uint16_t num_fpr)
+    // The allocator only READS the MachineFunction (interval
+    // computation); const-ref so emitters can allocate over a
+    // function they received by const& (Rule 73: interfaces that
+    // cannot misuse).
+    LinearScanAllocator(const MachineFunction& mf, uint16_t num_gpr, uint16_t num_fpr)
         : mf_(mf), num_gpr_(num_gpr), num_fpr_(num_fpr) {}
 
     // Run the allocator. Returns the number of spills emitted.
@@ -44,7 +48,7 @@ public:
     }
 
 private:
-    MachineFunction& mf_;
+    const MachineFunction& mf_;
     uint16_t num_gpr_;
     uint16_t num_fpr_;
     std::vector<PRegId> assignment_{};
