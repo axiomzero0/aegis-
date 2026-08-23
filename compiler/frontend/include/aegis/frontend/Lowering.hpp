@@ -30,6 +30,13 @@ public:
     // Lower an entire module into the graph. Returns true on success.
     Expected<bool> lower_module(const ASTModule& mod);
 
+    // Lower ONE function into this (fresh) graph. Public because
+    // separate machine emission compiles each function into its own
+    // graph (own vreg space) while sharing one SymbolTable, so call
+    // sites and callees agree on symbol ids. The graph must contain
+    // only this function (create a fresh Graph per call).
+    Expected<bool> lower_fn(const ASTFnDecl& fn);
+
 private:
     Graph&       g_;
     HashCons     hc_;
@@ -57,10 +64,6 @@ private:
 
     // Translate an expression and return its data NodeId (or an error).
     Expected<NodeId> lower_expr(const ASTNode& n);
-
-    // Translate a function. Sets up Start node outputs (control + effect)
-    // and the body.
-    Expected<bool> lower_fn(const ASTFnDecl& fn);
 
     // Reset per-function state.
     void reset_function_state() {

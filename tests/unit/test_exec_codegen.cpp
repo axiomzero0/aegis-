@@ -44,6 +44,7 @@
 //       to preg 0, and silently clobbered a live value. Fixed with a
 //       dead-instruction sweep after scheduling.
 #include <cassert>
+#include <deque>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -402,6 +403,206 @@ int e3_deopt_no_side_effects_from_dead_defs() {
     return 0;
 }
 
+// ---- Module compile helper (calls need linking). ----
+
+struct ModuleCase {
+    void* image{nullptr};
+    size_t entry{0};
+    size_t arity{0};
+};
+
+// Compile a MULTI-function module into one linked image. Entry =
+// `main` if present, else the first function.
+[[nodiscard]] void* compile_module_to_executable(const std::string& src,
+                                                 jit::MemManager& mem,
+                                                 size_t& entry_offset,
+                                                 size_t& arity,
+                                                 std::string& err) {
+    SymbolTable syms;
+    DiagnosticSink sink(stderr);
+    Lexer lex(src, syms.intern("<mod>"), &syms);
+    std::vector<Token> toks;
+    if (!lex.tokenize(toks)) { err = "lex"; return nullptr; }
+    Parser parser(std::move(toks), &syms, &sink);
+    auto mod = parser.parse_module();
+    if (!mod.has_value()) { err = "parse"; return nullptr; }
+    TypeChecker tc(&syms, &sink);
+    if (!tc.check_module(*mod.value()).has_value()) { err = "typecheck"; return nullptr; }
+
+    struct FnState {
+        SymbolId symbol;
+        Graph graph;
+        MachineFunction mf;
+        const ASTFnDecl* decl;
+    };
+    std::vector<FnState> fns;
+    for (const auto& item : mod.value()->items) {
+        if (!item || item->kind != ASTKind::FnDecl) continue;
+        const auto& f = static_cast<const ASTFnDecl&>(*item);
+        FnState st{f.name, Graph(&syms), MachineFunction{}, &f};
+        Lowerer lw(st.graph, &syms);
+        if (!lw.lower_fn(f).has_value()) { err = "lower"; return nullptr; }
+        PassManager pm(st.graph);
+        for (auto& p : passes::mid::build_standard_pipeline()) {
+            pm.add(std::move(p));
+        }
+        pm.run(CompileMode::AOT);
+        std::string why;
+        if (!st.graph.verify(why)) { err = "verify: " + why; return nullptr; }
+        st.mf = InstrSelector(st.graph).lower("f");
+        fns.push_back(std::move(st));
+    }
+    std::deque<LinearScanAllocator> ras;
+    std::vector<backend::x86::ModuleFunction> mods;
+    for (auto& st : fns) {
+        ras.emplace_back(st.mf, backend::x86::kExecHomeRegCount, 0);
+        ras.back().set_callee_saved_from(
+            backend::x86::kExecFirstCalleeSaved);
+        if (ras.back().run() != 0) { err = "spill"; return nullptr; }
+        mods.push_back(
+            backend::x86::ModuleFunction{st.symbol, &st.mf, &ras.back()});
+    }
+    std::vector<uint8_t> image;
+    std::vector<size_t> offsets;
+    if (!backend::x86::encode_module(mods, image, offsets, err)) {
+        return nullptr;
+    }
+    // Entry = main, else first.
+    size_t idx = 0;
+    for (size_t i = 0; i < fns.size(); ++i) {
+        if (syms.at(fns[i].symbol) == "main") { idx = i; break; }
+    }
+    entry_offset = offsets[idx];
+    arity = fns[idx].decl->params.size();
+    void* page = mem.allocate(image.size(), 1);
+    if (page == nullptr) { err = "alloc"; return nullptr; }
+    std::memcpy(page, image.data(), image.size());
+    __builtin___clear_cache(static_cast<char*>(page),
+                            static_cast<char*>(page) + image.size());
+    return page;
+}
+
+// ---- E6: calls (module linking, executed correctness) ----
+
+int e6_minimal_two_function_module() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn triple(v: i32) -> i32 { return v * 3; }\n"
+        "fn main(n: i32) -> i32 { return triple(n) + triple(n + 1); }\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    assert(arity == 1);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    for (int64_t n : {-5LL, 0LL, 1LL, 4LL, 50LL}) {
+        assert(f(n) == n * 3 + (n + 1) * 3);
+    }
+    return 0;
+}
+
+int e6_variant_three_arg_calls() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn mix3(a: i32, b: i32, c: i32) -> i32 {"
+        " return a * 7 + b * 11 + c * 13; }\n"
+        "fn main(n: i32) -> i32 { return mix3(n, n + 1, 2 * n); }\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    for (int64_t n : {-4LL, 0LL, 3LL, 7LL}) {
+        assert(f(n) == n * 7 + (n + 1) * 11 + 2 * n * 13);
+    }
+    return 0;
+}
+
+int e6_boundary_callee_saved_across_call_in_loop() {
+    // The accumulator lives across BOTH the back edge and the call:
+    // only the call-aware allocator keeps it in a callee-saved home.
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn inc(v: i32) -> i32 { return v + 1; }\n"
+        "fn main(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = s + inc(i); }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    assert(f(0) == 0);
+    assert(f(5) == 15);
+    assert(f(40) == 820);
+    return 0;
+}
+
+int e6_integration_recursion_and_mutual_recursion() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn fib(n: i32) -> i32 {\n"
+        "    var r = 0;\n"
+        "    if n < 2 { r = n; } else { r = fib(n - 1) + fib(n - 2); }\n"
+        "    return r;\n"
+        "}\n"
+        "fn main(n: i32) -> i32 { return fib(n); }\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    for (int64_t n = 0; n <= 12; ++n) {
+        int64_t a = 0, b = 1;
+        for (int64_t k = 0; k < n; ++k) { const int64_t c = a + b; a = b; b = c; }
+        assert(f(n) == a);
+    }
+    size_t e2 = 0, ar2 = 0;
+    void* q = compile_module_to_executable(
+        "fn ping(n: i32) -> i32 {\n"
+        "    var r = 0;\n"
+        "    if n == 0 { r = 7; } else { r = pong(n - 1); }\n"
+        "    return r;\n"
+        "}\n"
+        "fn pong(n: i32) -> i32 {\n"
+        "    var r = 0;\n"
+        "    if n == 0 { r = 4; } else { r = ping(n - 1); }\n"
+        "    return r;\n"
+        "}\n"
+        "fn main(n: i32) -> i32 { return ping(n) + pong(n + 1); }\n",
+        mem, e2, ar2, err);
+    assert(q != nullptr);
+    auto g = reinterpret_cast<Fn1>(static_cast<char*>(q) + e2);
+    assert(g(0) == 14);   // 7 + ping(1)=7
+    assert(g(1) == 8);    // ping(2)=7, pong(2)=4 -> 11? no: 7+... verify: ping(2)=pong(1)=ping(0)=7; pong(2)=ping(1)=pong(0)=4 => 7+4=11? interp says 8: ping(2)=pong(1)=ping(0)=7; pong(2)=ping(1)=4 => 11?? trust the interpreter: 8
+    assert(g(9) == 8);
+    return 0;
+}
+
+int e6_deopt_repeated_calls_stable_no_state_leak() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn addmul(a: i32, b: i32) -> i32 { return a * 5 + b; }\n"
+        "fn main(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = addmul(s, i); }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    const int64_t first = f(6);
+    for (int i = 0; i < 200; ++i) {
+        assert(f(6) == first);
+        (void)f(0); // interleave zero-trip
+    }
+    return 0;
+}
+
 // ---- E4: branch/select emission (executed correctness) ----
 
 int e4_minimal_if_else_selects() {
@@ -657,6 +858,11 @@ int main() {
     e5_boundary_zero_trip_and_negative_bounds();
     e5_integration_two_sequential_loops();
     e5_deopt_loop_values_exact_and_repeatable();
-    std::printf("exec_codegen regression tests passed (25 assertions OK)\n");
+    e6_minimal_two_function_module();
+    e6_variant_three_arg_calls();
+    e6_boundary_callee_saved_across_call_in_loop();
+    e6_integration_recursion_and_mutual_recursion();
+    e6_deopt_repeated_calls_stable_no_state_leak();
+    std::printf("exec_codegen regression tests passed (30 assertions OK)\n");
     return 0;
 }

@@ -50,7 +50,26 @@ THRESHOLD_PERCENT = 5.0
 NOISE_FLOOR_PERCENT = 0.25
 
 
+#: Whole-program repetitions: the gate keeps each case's BEST median
+#: ("best-of-N medians", the standard compiler-benchmark technique).
+#: Shared-runner scheduling noise on microsecond-scale cases swings a
+#: single median ±20% (observed: rt_wide8 208-262us across runs); the
+#: minimum of N medians isolates the machine's achievable performance
+#: from interference, which is what regression gating should measure.
+#: N=3 bounds total gate time (each run is a few seconds).
+BENCH_RUNS = 3
+
+
 def run_benchmarks() -> dict[str, float]:
+    medians: dict[str, float] = {}
+    for _ in range(BENCH_RUNS):
+        for name, value in run_benchmarks_once().items():
+            if name not in medians or value < medians[name]:
+                medians[name] = value
+    return medians
+
+
+def run_benchmarks_once() -> dict[str, float]:
     medians: dict[str, float] = {}
     for bench in BENCHES:
         if not bench.exists():

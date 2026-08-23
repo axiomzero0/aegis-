@@ -64,6 +64,7 @@ constexpr uint8_t kOpImulRR{0xAF};       // 0F AF /r : imul r64, r/m64
 constexpr uint8_t kOpMovzxR64R8{0xB6};   // 0F B6 /r : movzx r64, r/m8
 constexpr uint8_t kOpCmovNe{0x45};       // 0F 45 /r : cmovne r64, r/m64
 constexpr uint8_t kOpJmpRel32{0xE9};     // E9 cd : jmp rel32
+constexpr uint8_t kOpCallRel32{0xE8};    // E8 cd : call rel32
 constexpr uint8_t kOpJzRel32{0x84};      // 0F 84 cd : jz rel32 (ZF=1)
 /// Displacement width of a rel32 jump (both jmp and jz).
 constexpr uint32_t kRel32DispBytes{4};
@@ -131,6 +132,9 @@ struct Encoder {
     // UNSEEN label fails loudly rather than emitting 0 displacement).
     std::vector<int64_t> label_pos{};
     std::vector<std::pair<uint32_t, int64_t>> jump_fixups{};
+    // Call sites: (displacement position, callee SymbolId). The module
+    // linker resolves them across function boundaries.
+    std::vector<std::pair<uint32_t, int64_t>> call_fixups{};
 
     void define_label(int64_t id) {
         if (id < 0) return;
@@ -244,10 +248,35 @@ bool home_of(const LinearScanAllocator& ra, VRegId v, uint16_t& out,
 
 } // namespace
 
+// Forward declarations (the module linker drives per-function
+// encoding with call-site extraction).
+bool encode_one(const MachineFunction& fn,
+                const LinearScanAllocator& ra,
+                std::vector<uint8_t>& out,
+                std::string& err,
+                std::vector<std::pair<uint32_t, int64_t>>& call_sites);
+
 bool encode_executable(const MachineFunction& fn,
                        const LinearScanAllocator& ra,
                        std::vector<uint8_t>& out,
                        std::string& err) {
+    // Single-function entry point: calls cannot be linked without a
+    // module, so an encountered call leaves a fixup that is rejected
+    // loudly here (never silently zero-displacement).
+    std::vector<std::pair<uint32_t, int64_t>> calls;
+    if (!encode_one(fn, ra, out, err, calls)) return false;
+    if (!calls.empty()) {
+        err = "call requires module linking (encode_module)";
+        return false;
+    }
+    return true;
+}
+
+bool encode_one(const MachineFunction& fn,
+                const LinearScanAllocator& ra,
+                std::vector<uint8_t>& out,
+                std::string& err,
+                std::vector<std::pair<uint32_t, int64_t>>& call_sites) {
     Encoder enc{out, err};
     out.clear();
 
@@ -477,6 +506,62 @@ bool encode_executable(const MachineFunction& fn,
             enc.movzx_rax_al(dst);
             continue;
         }
+        if (mi.op == "call") {
+            if (!mi.has_imm) { err = ctx + ": call without callee"; return false; }
+            // Arguments -> ABI registers, permutation-safe (RAX staging
+            // for cycles — RAX is not a home and not an argument reg).
+            struct AMove { uint16_t src; uint16_t dst; };
+            std::vector<AMove> moves;
+            for (size_t a = 0; a < kMaxUsesPerInstr; ++a) {
+                if (mi.uses[a] == kInvalidVReg) break;
+                uint16_t home;
+                if (!home_of(ra, mi.uses[a], home, enc, ctx)) return false;
+                moves.push_back(AMove{home, kAbiArgRegs[a]});
+            }
+            bool staged = false;
+            while (true) {
+                std::vector<uint32_t> order(moves.size());
+                for (uint32_t k = 0; k < order.size(); ++k) order[k] = k;
+                bool found = false;
+                do {
+                    bool ok = true;
+                    for (size_t i = 0; i < order.size() && ok; ++i) {
+                        const uint16_t src = moves[order[i]].src;
+                        for (size_t j = 0; j < i; ++j) {
+                            if (moves[order[j]].dst == src &&
+                                src != moves[order[i]].dst) {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (ok) {
+                        for (uint32_t i : order) {
+                            enc.mov_rr(moves[i].dst, moves[i].src);
+                        }
+                        found = true;
+                        break;
+                    }
+                } while (std::next_permutation(order.begin(), order.end()));
+                if (found) break;
+                if (staged) {
+                    err = ctx + ": call argument move cycle unresolvable";
+                    return false;
+                }
+                enc.mov_rr(kRegRax, moves[0].src);
+                moves[0].src = kRegRax;
+                staged = true;
+            }
+            enc.put(kOpCallRel32);
+            enc.call_fixups.emplace_back(
+                static_cast<uint32_t>(out.size()), mi.imm);
+            for (uint32_t i = 0; i < kRel32DispBytes; ++i) enc.put(0);
+            // Result: RAX -> home (RAX is never a home).
+            uint16_t res;
+            if (!home_of(ra, mi.defs[0], res, enc, ctx)) return false;
+            enc.mov_rr(res, kRegRax);
+            continue;
+        }
         if (mi.op == "mov") {
             // Plain register move (loop-phi initialization at the
             // preheader and back-edge update at the jump tail).
@@ -542,6 +627,8 @@ bool encode_executable(const MachineFunction& fn,
         err = "machine function '" + fn.name + "' has no return";
         return false;
     }
+    call_sites = enc.call_fixups;
+
     // ---- Resolve jump fixups. ----
     for (const auto& [disp_pos, label] : enc.jump_fixups) {
         const int64_t target = enc.label_position(label);
@@ -562,6 +649,68 @@ bool encode_executable(const MachineFunction& fn,
         for (uint32_t i = 0; i < kRel32DispBytes; ++i) {
             out[disp_pos + i] = static_cast<uint8_t>(
                 (u >> (i * elf::kBitsPerByte)) & elf::kByteMask);
+        }
+    }
+    return true;
+}
+
+// ---- Module linking. ----
+bool encode_module(std::span<const ModuleFunction> fns,
+                   std::vector<uint8_t>& out,
+                   std::vector<size_t>& entry_offsets,
+                   std::string& err) {
+    out.clear();
+    entry_offsets.clear();
+    if (fns.empty()) { err = "module: no functions"; return false; }
+    struct Emitted {
+        SymbolId symbol;
+        size_t offset;
+        std::vector<std::pair<uint32_t, int64_t>> calls; // local pos, callee
+    };
+    std::vector<Emitted> emitted;
+    for (const auto& f : fns) {
+        if (f.mf == nullptr || f.ra == nullptr) {
+            err = "module: null function/allocator entry";
+            return false;
+        }
+        std::vector<uint8_t> buf;
+        std::vector<std::pair<uint32_t, int64_t>> calls;
+        if (!encode_one(*f.mf, *f.ra, buf, err, calls)) return false;
+        entry_offsets.push_back(out.size());
+        Emitted e{f.symbol, out.size(), {}};
+        e.calls = std::move(calls);
+        emitted.push_back(std::move(e));
+        out.insert(out.end(), buf.begin(), buf.end());
+    }
+    // ---- Patch calls across the whole image. ----
+    for (const auto& e : emitted) {
+        for (const auto& [local_pos, callee] : e.calls) {
+            size_t target = out.size();
+            bool found = false;
+            for (size_t i = 0; i < fns.size(); ++i) {
+                if (fns[i].symbol == callee) {
+                    target = entry_offsets[i];
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                err = "module: call to unknown function symbol " +
+                      std::to_string(callee);
+                return false;
+            }
+            const size_t disp_pos = e.offset + local_pos;
+            const int64_t rel = static_cast<int64_t>(target) -
+                (static_cast<int64_t>(disp_pos) + kRel32DispBytes);
+            if (rel < INT32_MIN || rel > INT32_MAX) {
+                err = "module: call displacement out of rel32 range";
+                return false;
+            }
+            const auto u = static_cast<uint32_t>(rel);
+            for (uint32_t i = 0; i < kRel32DispBytes; ++i) {
+                out[disp_pos + i] = static_cast<uint8_t>(
+                    (u >> (i * elf::kBitsPerByte)) & elf::kByteMask);
+            }
         }
     }
     return true;

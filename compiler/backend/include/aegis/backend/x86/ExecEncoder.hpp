@@ -27,11 +27,13 @@
 // ============================================================
 #pragma once
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
 #include "aegis/backend/MachineIR.hpp"
 #include "aegis/backend/RegAlloc/LinearScan.hpp"
+#include "aegis/support/StringIntern.hpp"
 
 namespace aegis::backend::x86 {
 
@@ -51,6 +53,27 @@ namespace aegis::backend::x86 {
 
 // The number of GPR homes the executable path supports. Pass this as
 // the allocator's num_gpr so preg ids line up with the home table.
+// Homes 0..6 are caller-saved (clobbered by calls); pass 7 as the
+// allocator's callee_saved_from when the function contains calls.
 inline constexpr uint16_t kExecHomeRegCount{12};
+/// First home index whose register survives a call (callee-saved).
+inline constexpr uint16_t kExecFirstCalleeSaved{7};
+
+// One function in a linked executable module.
+struct ModuleFunction {
+    SymbolId symbol{kInvalidSymbolId};   // callee identity
+    const MachineFunction* mf{nullptr};
+    const LinearScanAllocator* ra{nullptr};
+};
+
+// Encode + LINK a whole module into one executable image: functions
+// are laid out contiguously (prologues first to last), each `call`'s
+// rel32 is patched to its callee's image offset. Calls to symbols not
+// in the module fail loudly. On success `entry_offsets` holds each
+// function's byte offset (same order as `fns`).
+[[nodiscard]] bool encode_module(std::span<const ModuleFunction> fns,
+                                 std::vector<uint8_t>& out,
+                                 std::vector<size_t>& entry_offsets,
+                                 std::string& err);
 
 } // namespace aegis::backend::x86

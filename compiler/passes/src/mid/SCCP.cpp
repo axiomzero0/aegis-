@@ -112,27 +112,43 @@ int SCCPPass::run(Graph& g, const PassBudget& budget) {
             const Node& nd = g[id];
             if (nd.flags.has(NodeFlagBit::IsDead)) continue;
             if (nd.kind == NodeKind::Constant) continue; // already set
-            // Phi: meet over all inputs. It folds to a constant ONLY
-            // when every reachable input agrees on the same value —
-            // two DIFFERENT constants meet to Bottom (the branch
-            // decides at runtime). (Pre-fix this folded Phi(5, 9) to
-            // 0 via the binop default: a silent wrong answer.)
+            // Phi: fold ONLY when EVERY data input is the SAME
+            // constant. A TOP input is "no information" (e.g. an
+            // Altered producer like a call never computes a lattice
+            // value) and MUST poison the meet to Bottom — treating it
+            // as an unreachable edge silently folded phi(7,
+            // call_result) to 7, deleting the else arm and the call
+            // with it (caught as a wrong mutual-recursion result by
+            // the runtime differential harness). Distinct constants
+            // also meet to Bottom (the branch decides at runtime).
             if (nd.kind == NodeKind::Phi) {
                 LatticeVal meet;
                 bool have_any = false;
-                bool phi_bottom = false;
+                bool poison = false;
                 for (NodeId in : nd.data_ins()) {
                     if (in == kInvalidNodeId || in >= n) continue;
+                    const Node& in_node = g[in];
+                    // The region/loop slot is structural, not a value.
+                    if (in_node.kind == NodeKind::Region ||
+                        in_node.kind == NodeKind::Loop) {
+                        continue;
+                    }
                     const LatticeVal& v = state[in];
-                    if (v.is_bottom()) { phi_bottom = true; break; }
-                    if (v.is_top()) continue; // unreachable edge so far
-                    LatticeVal next = meet;
-                    if (have_any) next.merge(v); else { next = v; have_any = true; }
-                    meet = next;
+                    if (v.is_top() || v.is_bottom()) {
+                        poison = true; // unknown or overdefined input
+                        break;
+                    }
+                    if (!have_any) {
+                        meet = v;
+                        have_any = true;
+                    } else if (meet.value != v.value) {
+                        poison = true; // differing constants
+                        break;
+                    }
                 }
-                if (phi_bottom) {
+                if (poison || !have_any) {
                     if (state[id].merge(LatticeVal::bottom())) changed = true;
-                } else if (have_any && state[id].merge(meet)) {
+                } else if (state[id].merge(meet)) {
                     changed = true;
                 }
                 continue;

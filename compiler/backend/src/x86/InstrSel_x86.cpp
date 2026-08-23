@@ -13,6 +13,35 @@ namespace {
 /// Bits per byte — bounds the x86-64 shift-count immediate to the
 /// architectural range [0, 63] (Rule D.1: named, not a literal).
 constexpr int64_t g_BitsPerByte{8};
+
+// Is this node a REGION-pred merge phi (a select)?
+bool is_select_phi(const Graph& g, NodeId id) {
+    if (id >= g.size()) return false;
+    const Node& n = g[id];
+    return n.kind == NodeKind::Phi &&
+           n.inputs.size() == ir::shape::kPhiInputs2Branches &&
+           n.inputs[0] < g.size() &&
+           g[n.inputs[0]].kind == NodeKind::Region;
+}
+
+// Is this node a loop phi (its region input is a Loop header)?
+bool is_loop_phi_pub(const Graph& g, NodeId id) {
+    if (id >= g.size()) return false;
+    const Node& n = g[id];
+    return n.kind == NodeKind::Phi && !n.inputs.empty() &&
+           n.inputs[0] < g.size() && g[n.inputs[0]].kind == NodeKind::Loop;
+}
+
+// Is this node the VALUE projection (proj 0) of a Call node?
+bool is_call_value_proj(const Graph& g, NodeId id) {
+    if (id >= g.size()) return false;
+    const Node& n = g[id];
+    return n.kind == NodeKind::Proj && n.payload.proj_index == 0 &&
+           !n.inputs.empty() && n.inputs[0] < g.size() &&
+           (g[n.inputs[0]].kind == NodeKind::CallPure ||
+            g[n.inputs[0]].kind == NodeKind::CallAltered ||
+            g[n.inputs[0]].kind == NodeKind::CallCrowded);
+}
 /// Depth bound for the region-chain walk below (nested-merge lookups
 /// are shallow; the bound only guards against malformed graphs).
 constexpr uint32_t g_MaxRegionWalkDepth{64};
@@ -226,6 +255,50 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 per_node.push_back(NodeInstr{id, mi});
                 break;
             }
+            case NodeKind::CallPure:
+            case NodeKind::CallAltered:
+            case NodeKind::CallCrowded: {
+                // `call` pseudo-instr: uses = argument vregs (SysV
+                // order), defs[0] = result vreg, imm = callee
+                // SymbolId. The module encoder resolves symbols to
+                // code offsets and patches rel32; argument placement
+                // into ABI registers happens at encode time (a
+                // permutation-safe parallel move — destinations are
+                // homes' registers, so naive sequential moves could
+                // clobber an unread argument home).
+                auto args = n.data_ins();
+                if (args.size() > kMaxUsesPerInstr) {
+                    // Loud skip is wrong here (silent wrong code);
+                    // record nothing and let the harness guard reject
+                    // the undefined result vreg downstream.
+                    break;
+                }
+                MachineInstr mi;
+                mi.op = "call";
+                mi.defs[0] = get_or_assign(id);
+                for (size_t a = 0; a < args.size(); ++a) {
+                    mi.uses[a] = get_or_assign(args[a]);
+                }
+                mi.has_imm = true;
+                mi.imm = static_cast<int64_t>(n.payload.sym);
+                per_node.push_back(NodeInstr{id, mi});
+                break;
+            }
+            case NodeKind::Proj: {
+                // Proj(0) of a Call is the call's VALUE: alias its
+                // vreg to the call's result (no instruction of its
+                // own). Other projections are structural.
+                if (n.payload.proj_index != 0) break;
+                if (n.inputs.empty() || n.inputs[0] >= g_.size()) break;
+                const NodeId base = n.inputs[0];
+                if (base != kInvalidNodeId &&
+                    (g_[base].kind == NodeKind::CallPure ||
+                     g_[base].kind == NodeKind::CallAltered ||
+                     g_[base].kind == NodeKind::CallCrowded)) {
+                    vreg_per_node[id] = vreg_per_node[base];
+                }
+                break;
+            }
             case NodeKind::Phi: {
                 // MERGE phi (region-pred) -> `select` pseudo-instr:
                 // dst = cond ? then_val : else_val. The condition is
@@ -288,6 +361,116 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 break;
         }
     }
+    // Node-id -> per_node index (shared by both emission paths and
+    // the ownership pass below).
+    instr_of_shared_.assign(g_.size(), -1);
+    for (size_t k = 0; k < per_node.size(); ++k) {
+        instr_of_shared_[per_node[k].node] = static_cast<int64_t>(k);
+    }
+
+
+
+    // ---- Select-phi ownership (emission-order correctness). ----
+    //
+    // A merge phi's arm computations must be emitted INSIDE its
+    // branch region (guarded), never before it. The per_node loop
+    // walks in node-id order and the arms usually have LOWER ids than
+    // the phi (lowering creates arm values before the merge), so
+    // without ownership the arms emit first and the "branch" only
+    // guards the movs — the arms (including calls!) still ran
+    // unconditionally: recursive fib(0) overflowed the stack (caught
+    // by the runtime differential harness). Nodes whose entire use
+    // set lives within one select's region are OWNED by it; the outer
+    // walks skip owned nodes, the region emits them.
+    {
+        // Tentative ownership by closure walk (stopping at inner
+        // select phis — they own their own subtrees).
+        std::vector<NodeId> owner(g_.size(), kInvalidNodeId);
+        for (const auto& ni : per_node) {
+            if (!is_select_phi(g_, ni.node)) continue;
+            const NodeId S = ni.node;
+            std::vector<NodeId> work;
+            work.push_back(g_[S].inputs[1]);
+            work.push_back(g_[S].inputs[2]);
+            const NodeId gif = governing_if(g_, g_[S].inputs[0]);
+            if (gif != kInvalidNodeId &&
+                g_[gif].inputs.size() == ir::shape::kIfInputs) {
+                work.push_back(g_[gif].inputs[ir::shape::kIfCondIndex]);
+            }
+            std::vector<uint8_t> seen(g_.size(), 0);
+            while (!work.empty()) {
+                const NodeId n = work.back();
+                work.pop_back();
+                if (n == kInvalidNodeId || n >= g_.size()) continue;
+                if (is_select_phi(g_, n)) continue; // inner owns below
+                // Loop phis cut the walk: their inputs belong to the
+                // LOOP machinery (entry consts, back-edge updates),
+                // not to this select's arms. Descending through them
+                // claimed those nodes as select property and every
+                // emitter then skipped them — the loop's constants and
+                // induction update were never emitted and the loop
+                // spun forever on a stale register (caught as a
+                // runtime timeout by the harness).
+                if (is_loop_phi_pub(g_, n)) continue;
+                if (seen[n] != 0) continue;
+                seen[n] = 1;
+                if (instr_of_shared_[n] != -1 &&
+                    owner[n] == kInvalidNodeId) {
+                    owner[n] = S;
+                }
+                for (NodeId in : g_[n].inputs) {
+                    if (in == kInvalidNodeId || in >= g_.size()) continue;
+                    work.push_back(in);
+                }
+            }
+            select_owner_[S] = owner; // per-select view (validated next)
+        }
+        // Validation to fixpoint: an owned node's EVERY user must be
+        // its owner or owned by the same owner. Shared escapes free
+        // the node (emitted early, unguarded — safe, just less
+        // optimal; the corpus arms don't escape).
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (auto& [S, own] : select_owner_) {
+                (void)S;
+                for (NodeId n = 0; n < g_.size(); ++n) {
+                    if (own[n] == kInvalidNodeId) continue;
+                    for (NodeId u : g_.users_snapshot(n)) {
+                        if (u >= g_.size()) continue;
+                        const bool ok = u == S ||
+                                        (own[u] != kInvalidNodeId &&
+                                         own[u] == own[n]) ||
+                                        select_owner_.count(u) == 0;
+                        if (!ok && select_owner_.count(u) == 0 &&
+                            u != S) {
+                            // user escapes this select: free the node.
+                            own[n] = kInvalidNodeId;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Flatten into one global owner view for the walkers.
+        select_global_owner_.assign(g_.size(), kInvalidNodeId);
+        for (auto& [S, own] : select_owner_) {
+            for (NodeId n = 0; n < g_.size(); ++n) {
+                if (own[n] == S &&
+                    select_global_owner_[n] == kInvalidNodeId) {
+                    select_global_owner_[n] = S;
+                }
+            }
+        }
+    }
+
+        std::vector<uint8_t> state(g_.size(), 0); // 0=new 1=on-stack 2=done
+        // Explicit stack: (node, inputs_pushed). Rule 73: no recursion
+        // depth limits.
+        struct Frame { NodeId node; bool expanded; };
+        std::vector<Frame> stack;
+
     // ---- Path selection: loops need STRUCTURED emission. ----
     //
     // Straight-line code (no Loop nodes) uses the flat topological
@@ -322,18 +505,19 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
     // over this clean stream.
     {
         // instr index per node id (only for collected nodes).
-        std::vector<int64_t> instr_of(g_.size(), -1);
-        for (size_t k = 0; k < per_node.size(); ++k) {
-            instr_of[per_node[k].node] = static_cast<int64_t>(k);
-        }
-        std::vector<uint8_t> state(g_.size(), 0); // 0=new 1=on-stack 2=done
-        // Explicit stack: (node, inputs_pushed). Rule 73: no recursion
-        // depth limits.
-        struct Frame { NodeId node; bool expanded; };
-        std::vector<Frame> stack;
+        // instr_of is built once, before the ownership pass (below)
+        // so BOTH emission paths share it.
+        std::vector<int64_t> instr_of(instr_of_shared_);
+
+
         for (auto& [node_id, mi] : per_node) {
             (void)mi;
             if (state[node_id] != 0) continue;
+            // Owned nodes emit inside their select's branch region.
+            if (select_global_owner_[node_id] != kInvalidNodeId &&
+                !is_select_phi(g_, node_id)) {
+                continue;
+            }
             stack.push_back(Frame{node_id, false});
             while (!stack.empty()) {
                 Frame& top = stack.back();
@@ -342,6 +526,37 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 // dangling reference when the stack vector reallocates
                 // (ASan-caught; Rule 73).
                 const NodeId top_node = top.node;
+                // SELECT PHI -> real branch region. Branchless cmov
+                // evaluates BOTH arms: unsound when an arm is
+                // non-terminating (recursive fib(0) still ran
+                // fib(-1)+fib(-2) and overflowed the stack — caught by
+                // the runtime differential harness) or effectful.
+                // Emitted: cond-closure; jz L_else; then-closure; mov
+                // dst,then; jmp L_end; L_else:; else-closure; mov
+                // dst,else; L_end:.
+                if (g_[top_node].kind == NodeKind::Phi &&
+                    g_[top_node].inputs.size() ==
+                        ir::shape::kPhiInputs2Branches &&
+                    g_[top_node].inputs[0] < g_.size() &&
+                    g_[g_[top_node].inputs[0]].kind == NodeKind::Region) {
+                    stack.pop_back();
+                    if (state[top_node] == g_VisitDone) continue;
+                    // The region emitter works from its own 'emitted'
+                    // view; mirror state into it lazily via a local
+                    // vector shared through the call.
+                    std::vector<uint8_t> emitted(g_.size(), 0);
+                    for (NodeId q = 0; q < g_.size(); ++q) {
+                        if (state[q] == g_VisitDone) emitted[q] = 1;
+                    }
+                    emitted[top_node] = 1;
+                    emit_select_region(top_node, per_node, instr_of,
+                                       emitted, vreg_per_node, next_vreg,
+                                       mf);
+                    for (NodeId q = 0; q < g_.size(); ++q) {
+                        if (emitted[q] != 0) state[q] = g_VisitDone;
+                    }
+                    continue;
+                }
                 if (!top.expanded) {
                     if (state[top_node] == g_VisitDone) { stack.pop_back(); continue; }
                     state[top_node] = g_VisitOnStack;
@@ -362,7 +577,18 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                     for (size_t k = ins.size(); k-- > 0;) {
                         NodeId in = ins[k];
                         if (in == kInvalidNodeId || in >= g_.size()) continue;
-                        if (instr_of[in] == -1) continue;      // no instr
+                        // Follow call-value projections through to the
+                        // call (see the structured emitter's note).
+                        if (instr_of[in] == -1) {
+                            if (!is_call_value_proj(g_, in)) continue;
+                            in = g_[in].inputs[0];
+                            if (instr_of[in] == -1) continue;
+                        }
+                        // Owned children emit inside their select.
+                        if (select_global_owner_[in] != kInvalidNodeId &&
+                            !is_select_phi(g_, in)) {
+                            continue;
+                        }
                         if (state[in] != 0) continue;          // visited
                         stack.push_back(Frame{in, false});
                         pushed_any = true;
@@ -445,16 +671,17 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
             mf.instrs = std::move(live);
         }
 
-        // Cycle guard (Rule D.3): every emittable instr must have been
-        // scheduled. A use cycle in straight-line SSA is a compiler
-        // bug — abort loudly rather than emit wrong code.
-        if (mf.instrs.size() > per_node.size()) {
-            std::fprintf(stderr,
-                         "instrsel: scheduling left %zu of %zu instrs "
-                         "unscheduled (use cycle?)\n",
-                         per_node.size() - mf.instrs.size(),
-                         per_node.size());
-            std::abort();
+        // Cycle guard (Rule D.3): every collected node must have been
+        // EMITTED (select phis emit branch REGIONS whose instruction
+        // count differs from their collected entry, so a size
+        // comparison is meaningless — check emission state per node).
+        for (const auto& ni : per_node) {
+            if (state[ni.node] != g_VisitDone) {
+                std::fprintf(stderr,
+                             "instrsel: node %u never scheduled "
+                             "(use cycle?)\n", ni.node);
+                std::abort();
+            }
         }
     }
     return mf;
@@ -492,26 +719,144 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
 // pure and are fully recomputed each iteration.
 namespace {
 
-// Is this node a loop phi (its region input is a Loop header)?
-bool is_loop_phi(const Graph& g, NodeId id) {
-    if (id >= g.size()) return false;
-    const Node& n = g[id];
-    return n.kind == NodeKind::Phi && !n.inputs.empty() &&
-           n.inputs[0] < g.size() && g[n.inputs[0]].kind == NodeKind::Loop;
+} // namespace
+
+// ---- Shared emission helpers (flat + structured paths). ----
+
+// Iterative post-order emission of one value's computation closure.
+// Skips loop phis (pre-defined) and follows call-value projections;
+// nested select phis recurse into branch regions.
+void InstrSelector::emit_value_closure(
+    NodeId root, const std::vector<NodeInstr>& per_node,
+    const std::vector<int64_t>& instr_of, std::vector<uint8_t>& emitted,
+    std::vector<VRegId>& vreg_of, VRegId& next_vreg,
+    MachineFunction& mf) {
+    if (root == kInvalidNodeId || root >= g_.size()) return;
+    // A call's VALUE projection carries no instruction: follow it to
+    // the call so arm closures rooted at projections actually emit
+    // (pre-fix the closure no-op'd and the call silently vanished —
+    // the guard could not see it because the vreg linkage still
+    // resolved; observed as a wrong mutual-recursion result).
+    if (instr_of[root] == -1 && is_call_value_proj(g_, root)) {
+        root = g_[root].inputs[0];
+    }
+    if (instr_of[root] != -1 && emitted[root] == 0) {
+        struct Frame { NodeId node; bool expanded; };
+        std::vector<Frame> st;
+        std::vector<uint8_t> onpath(g_.size(), 0);
+        st.push_back(Frame{root, false});
+        while (!st.empty()) {
+            const NodeId node = st.back().node;
+            // Nested select: branch region.
+            if (is_select_phi(g_, node)) {
+                st.pop_back();
+                if (emitted[node] == 0) {
+                    emitted[node] = 1;
+                    emit_select_region(node, per_node, instr_of, emitted,
+                                       vreg_of, next_vreg, mf);
+                }
+                continue;
+            }
+            if (!st.back().expanded) {
+                st.back().expanded = true; // BEFORE pushes (Rule 73)
+                if (onpath[node] == 0) onpath[node] = 1;
+                const auto& ins = g_[node].inputs;
+                for (size_t k = ins.size(); k-- > 0;) {
+                    NodeId in = ins[k];
+                    if (in == kInvalidNodeId || in >= g_.size()) continue;
+                    if (is_loop_phi_pub(g_, in)) continue; // pre-defined
+                    if (instr_of[in] == -1) {
+                        // Follow call-value projections to the call.
+                        if (!is_call_value_proj(g_, in)) continue;
+                        in = g_[in].inputs[0];
+                        if (in >= g_.size() || instr_of[in] == -1) continue;
+                    }
+                    if (emitted[in] != 0) continue;
+                    if (onpath[in] != 0) continue;
+                    st.push_back(Frame{in, false});
+                }
+                continue;
+            }
+            st.pop_back();
+            if (emitted[node] != 0) continue;
+            emitted[node] = 1;
+            mf.instrs.push_back(
+                per_node[static_cast<size_t>(instr_of[node])].mi);
+        }
+    }
 }
 
-} // namespace
+// Emit a merge-phi as a REAL branch region: cond; jz L_else;
+// then-closure; mov dst,then; jmp L_end; L_else:; else-closure;
+// mov dst,else; L_end:. Branchless cmov evaluates BOTH arms, which is
+// unsound for non-terminating arms (recursive fib(0) still ran
+// fib(-1)+fib(-2) and overflowed the stack — caught by the runtime
+// differential harness) and effectful arms.
+void InstrSelector::emit_select_region(
+    NodeId phi, const std::vector<NodeInstr>& per_node,
+    const std::vector<int64_t>& instr_of, std::vector<uint8_t>& emitted,
+    std::vector<VRegId>& vreg_of, VRegId& next_vreg,
+    MachineFunction& mf) {
+    const NodeId region = g_[phi].inputs[0];
+    const NodeId if_node = governing_if(g_, region);
+    if (if_node == kInvalidNodeId) return; // guard rejects downstream
+    const NodeId cond = g_[if_node].inputs[ir::shape::kIfCondIndex];
+
+    auto vreg_for = [&](NodeId id) -> VRegId {
+        if (id >= g_.size()) return kInvalidVReg;
+        if (vreg_of[id] != kInvalidVReg) return vreg_of[id];
+        return vreg_of[id] = next_vreg++;
+    };
+
+    // Unique opaque label pair from the select allocator (disjoint
+    // from the structured loop label space; non-negative for the
+    // encoder's id-indexed table).
+    const int64_t l_else = static_cast<int64_t>(select_label_next_++);
+    const int64_t l_end  = static_cast<int64_t>(select_label_next_++);
+    const NodeId then_v = g_[phi].inputs[1];
+    const NodeId else_v = g_[phi].inputs[2];
+
+    emit_value_closure(cond, per_node, instr_of, emitted, vreg_of,
+                       next_vreg, mf);
+    {
+        MachineInstr jz; jz.op = "jz";
+        jz.uses[0] = vreg_for(cond);
+        jz.has_imm = true; jz.imm = l_else;
+        mf.instrs.push_back(jz);
+    }
+    emit_value_closure(then_v, per_node, instr_of, emitted, vreg_of,
+                       next_vreg, mf);
+    {
+        MachineInstr mv; mv.op = "mov";
+        mv.defs[0] = vreg_for(phi);
+        mv.uses[0] = vreg_for(then_v);
+        mf.instrs.push_back(mv);
+        MachineInstr jp; jp.op = "jmp"; jp.has_imm = true; jp.imm = l_end;
+        mf.instrs.push_back(jp);
+        MachineInstr le; le.op = "label"; le.has_imm = true;
+        le.imm = l_else;
+        mf.instrs.push_back(le);
+    }
+    emit_value_closure(else_v, per_node, instr_of, emitted, vreg_of,
+                       next_vreg, mf);
+    {
+        MachineInstr mv; mv.op = "mov";
+        mv.defs[0] = vreg_for(phi);
+        mv.uses[0] = vreg_for(else_v);
+        mf.instrs.push_back(mv);
+        MachineInstr le; le.op = "label"; le.has_imm = true;
+        le.imm = l_end;
+        mf.instrs.push_back(le);
+    }
+}
 
 void InstrSelector::emit_structured_loops(const std::vector<NodeId>& loops,
                                           std::vector<NodeInstr>& per_node,
                                           std::vector<VRegId>& vreg_per_node,
                                           VRegId& next_vreg,
                                           MachineFunction& mf) {
-    // instr index per node id (collected nodes only).
-    std::vector<int64_t> instr_of(g_.size(), -1);
-    for (size_t k = 0; k < per_node.size(); ++k) {
-        instr_of[per_node[k].node] = static_cast<int64_t>(k);
-    }
+    // instr index per node id (shared, built by lower()).
+    std::vector<int64_t> instr_of(instr_of_shared_);
 
     // Vreg assignment is SHARED with the collection phase (the map
     // is passed in): nodes the selector already touched keep their
@@ -553,12 +898,33 @@ void InstrSelector::emit_structured_loops(const std::vector<NodeId>& loops,
         std::vector<uint8_t> onpath(g_.size(), 0);
         for (NodeId r : roots) {
             if (r == kInvalidNodeId || r >= g_.size()) continue;
-            if (instr_of[r] == -1 || emitted[r] != 0 || is_loop_phi(g_, r))
+            if (instr_of[r] == -1 || emitted[r] != 0 ||
+                is_loop_phi_pub(g_, r))
+                continue;
+            // Owned nodes emit inside their select's branch region.
+            if (select_global_owner_[r] != kInvalidNodeId &&
+                !is_select_phi(g_, r))
                 continue;
             if (onpath[r] == 0) st.push_back(Frame{r, false});
         }
         while (!st.empty()) {
             const NodeId node = st.back().node;
+            // SELECT PHI inside a loop body: branch region (same
+            // soundness rationale as the flat path — cmov evaluates
+            // both arms).
+            if (g_[node].kind == NodeKind::Phi &&
+                g_[node].inputs.size() ==
+                    ir::shape::kPhiInputs2Branches &&
+                g_[node].inputs[0] < g_.size() &&
+                g_[g_[node].inputs[0]].kind == NodeKind::Region) {
+                st.pop_back();
+                if (emitted[node] == 0) {
+                    emitted[node] = 1;
+                    emit_select_region(node, per_node, instr_of, emitted,
+                                       vreg_per_node, next_vreg, mf);
+                }
+                continue;
+            }
             if (!st.back().expanded) {
                 st.back().expanded = true; // BEFORE pushes (Rule 73)
                 onpath[node] = 1;
@@ -566,10 +932,25 @@ void InstrSelector::emit_structured_loops(const std::vector<NodeId>& loops,
                 for (size_t k = ins.size(); k-- > 0;) {
                     NodeId in = ins[k];
                     if (in == kInvalidNodeId || in >= g_.size()) continue;
-                    if (instr_of[in] == -1) continue;
+                    // A call's VALUE projection carries no instruction
+                    // (its vreg is the call's result): follow THROUGH
+                    // it so the call itself is emitted — skipping it
+                    // left calls inside loop bodies unemitted and the
+                    // guard rejected the undefined result (Rule D.3).
+                    if (instr_of[in] == -1) {
+                        if (!is_call_value_proj(g_, in)) continue;
+                        in = g_[in].inputs[0]; // the call itself
+                        if (instr_of[in] == -1) continue;
+                    }
+                    // Owned children emit inside their select.
+                    if (select_global_owner_[in] != kInvalidNodeId &&
+                        !is_select_phi(g_, in)) {
+                        continue;
+                    }
                     if (emitted[in] != 0) continue;
-                    if (is_loop_phi(g_, in)) continue; // cycle cut
+                    if (is_loop_phi_pub(g_, in)) continue; // cycle cut
                     if (onpath[in] != 0) continue;
+                    if (instr_of[in] == -1) continue;
                     st.push_back(Frame{in, false});
                 }
                 // A select phi's condition lives on the governing If,

@@ -87,9 +87,30 @@ void LinearScanAllocator::compute_intervals(std::vector<LiveInterval>& out) {
             }
         }
     }
+    // ---- CALL SPANNING: caller-saved exclusion. ----
+    //
+    // An interval (AFTER loop widening — a value carried across a
+    // back edge that contains a call spans it too) that still covers
+    // a `call` instruction must live in a callee-saved register: the
+    // call's ABI sequence overwrites the argument registers and the
+    // callee owns all caller-saved registers per SysV.
+    std::vector<uint8_t> spans_call(max_v + 1, 0);
+    for (uint32_t i = 0; i < mf_.instrs.size(); ++i) {
+        if (mf_.instrs[i].op != "call") continue;
+        for (VRegId v = 0; v <= max_v; ++v) {
+            if (first[v] == 0xFFFFFFFFu) continue;
+            // Strictly ACROSS: an operand whose LAST read is this call
+            // (last == i) is consumed by the argument moves and does
+            // not need to survive it; marking it call-spanning forced
+            // every call argument into the 5 callee-saved registers
+            // and spilled real cross-call values.
+            if (first[v] <= i && i < last[v]) spans_call[v] = 1;
+        }
+    }
     for (VRegId v = 0; v <= max_v; ++v) {
         if (first[v] == 0xFFFFFFFFu) continue;
-        out.push_back(LiveInterval{v, rc[v], first[v], last[v] + 1});
+        out.push_back(LiveInterval{v, rc[v], first[v], last[v] + 1,
+                                   spans_call[v] != 0});
     }
 }
 
@@ -118,6 +139,8 @@ uint32_t LinearScanAllocator::run() {
             active.end());
 
         uint16_t num_preg = (iv.rc == RegClass::Float) ? num_fpr_ : num_gpr_;
+        // Call-spanning values may only take callee-saved pregs.
+        const uint16_t preg_floor = iv.spans_call ? callee_saved_from_ : 0;
 
         // Find a free PReg by scanning active entries.
         // Law: Rule 61 — kLinearScanMaxPRegs is a named constant, not
@@ -131,7 +154,7 @@ uint32_t LinearScanAllocator::run() {
                 used[e.preg] = true;
             }
         }
-        for (PRegId p = 0; p < num_preg; ++p) {
+        for (PRegId p = preg_floor; p < num_preg; ++p) {
             if (!used[p]) { free_preg = p; break; }
         }
 

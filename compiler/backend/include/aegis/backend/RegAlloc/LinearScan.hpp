@@ -24,6 +24,9 @@ struct LiveInterval {
     RegClass rc{RegClass::General};
     uint32_t start{0};  // first instruction index where vreg is live
     uint32_t end{0};    // last instruction index + 1
+    // True when the interval covers a `call`: allocation must pick a
+    // callee-saved preg (>= the allocator's callee_saved_from).
+    bool    spans_call{false};
 };
 
 class LinearScanAllocator {
@@ -34,6 +37,15 @@ public:
     // cannot misuse).
     LinearScanAllocator(const MachineFunction& mf, uint16_t num_gpr, uint16_t num_fpr)
         : mf_(mf), num_gpr_(num_gpr), num_fpr_(num_fpr) {}
+
+    // CALL CLOBBERING: registers with preg id < `from` are caller-saved
+    // (destroyed by the `call` pseudo-instruction's ABI sequence —
+    // argument registers are written, and the callee owns them per
+    // SysV). Values whose (loop-widened) interval spans a call must be
+    // allocated a preg >= `from`. Default 0 = no calls, no restriction.
+    void set_callee_saved_from(uint16_t from) noexcept {
+        callee_saved_from_ = from;
+    }
 
     // Run the allocator. Returns the number of spills emitted.
     uint32_t run();
@@ -51,6 +63,7 @@ private:
     const MachineFunction& mf_;
     uint16_t num_gpr_;
     uint16_t num_fpr_;
+    uint16_t callee_saved_from_{0};
     std::vector<PRegId> assignment_{};
     std::vector<uint8_t> spilled_{};
 

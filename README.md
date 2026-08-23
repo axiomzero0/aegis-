@@ -39,11 +39,14 @@ green:
   divergence-point If, nested merges included), and a
   dead-instruction sweep), `LinearScan` (Phase 1 register allocator
   per the spec), `ExecEncoder` (real x86-64 encodings — full integer
-  ALU/div/shift/setcc set plus cmov-based select, structured loop
-  lowering (preheader phi-init, jz exit check, back-edge register
-  updates, jmp — with label backpatching), SysV parameter
+  ALU/div/shift/setcc set, REAL-BRANCH select lowering (cmov removed
+  — it evaluates both arms, unsound for recursive branches), structured
+  loop lowering (preheader phi-init, jz exit check, back-edge register
+  updates, jmp), SysV call lowering (argument parallel-moves +
+  cross-function rel32 linking via encode_module; call-aware register
+  allocation keeps cross-call values in callee-saved homes), parameter
   parallel-move with RAX cycle staging, callee-saved prologue —
-  producing directly executable bytes), `Target` (abstract target
+  producing directly executable, cross-linked module images), `Target` (abstract target
   interface for x86/ARM), `Emitter` (real ELF64 object file writing),
   `ElfConstants` (named ELF ABI constants per Rule D.1/D.2),
   `RegAlloc/RegAllocInterface` for plugging in alternative allocators.
@@ -134,7 +137,7 @@ was intended — Rule 52), and commit it together with the pass change.
 
 | Rule | Where |
 |------|-------|
-| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (45 tests, 9 bugs) + `tests/unit/test_exec_codegen.cpp` (25 assertions, 5 bug classes) |
+| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (50 tests, 10 bugs) + `tests/unit/test_exec_codegen.cpp` (30 assertions, 6 bug classes) |
 | Rule 37 (golden tests per pass) | `tests/integration/golden/` (31 passes × ≥10, both modes) |
 | Rule 38 (differential testing in CI) | `tests/integration/run_differential.py` + CI |
 | Rule 39 (weekly deopt-path testing) | CI `schedule:` job (extended corpus) |

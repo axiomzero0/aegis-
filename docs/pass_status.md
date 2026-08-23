@@ -62,15 +62,19 @@ Legend:
 
 ## Backend-executable status (context)
 
-Straight-line integer arithmetic, branch merges, AND source-level
-loops execute natively (ExecEncoder: full ALU/div/shift/setcc set,
-branchless select via mov/test/cmovne, and structured loop lowering —
-preheader phi-initialization, `jz` exit check, back-edge register
-updates, `jmp`, with label backpatching and linear-scan intervals
-loop-widened so values live across back edges keep their registers).
-`bench_runtime` proves correctness against an AST interpreter
-(statement-level, including loops) and measures 13–24x over
-interpretation; loops run at 10–17 ns/call. Not yet executable: calls,
+Straight-line integer arithmetic, branch merges, source-level loops,
+AND CALLS (including recursion and mutual recursion) execute natively.
+ExecEncoder: full ALU/div/shift/setcc set, REAL-BRANCH select lowering
+(a merge phi emits cond/jz/arm-mov/jmp/arm-mov — branchless cmov was
+removed: it evaluates both arms, unsound for non-terminating recursive
+arms), structured loop lowering (preheader phi-init, `jz` exit check,
+back-edge register updates, `jmp`), SysV call lowering with
+permutation-validated argument parallel-moves and cross-function
+rel32 linking (encode_module), and a call-aware register allocator
+(values live across calls are restricted to callee-saved homes).
+`bench_runtime` (17 cases) proves correctness against an AST
+interpreter (statement-level, loops + calls) and measures: arithmetic
+4–20 ns/call, loops 10–24 ns/call, calls 5–26 ns/call, recursive
+fib(10) 66 ns/call (73.9x over interpretation). Not yet executable:
 memory operations, nested loops — each rejected loudly by the encoder
-and by the harness's no-silent-omission guard, never silently
-dropped.
+and the harness's no-silent-omission guard, never silently dropped.
