@@ -603,6 +603,141 @@ int e6_deopt_repeated_calls_stable_no_state_leak() {
     return 0;
 }
 
+// ---- E7: nested loops + effect-chain call emission ----
+
+int e7_minimal_nested_loop_executes() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn main(n: i32, m: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { for j in 0..m { s = s + i * j + 1; } }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    assert(arity == 2);
+    using Fn2 = int64_t (*)(int64_t, int64_t);
+    auto f = reinterpret_cast<Fn2>(static_cast<char*>(p) + entry);
+    for (int64_t n : {0LL, 1LL, 3LL, 5LL}) {
+        for (int64_t m : {0LL, 2LL, 4LL}) {
+            int64_t want = 0;
+            for (int64_t i = 0; i < n; ++i)
+                for (int64_t j = 0; j < m; ++j) want += i * j + 1;
+            assert(f(n, m) == want);
+        }
+    }
+    return 0;
+}
+
+int e7_variant_triangular_bounds_and_call() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    // Inner bound = the OUTER induction variable (the inner exit
+    // condition reads the outer phi), plus a call inside the inner
+    // body: the innermost loop is a call site with two live phis.
+    void* p = compile_module_to_executable(
+        "fn add1(v: i32) -> i32 { return v + 1; }\n"
+        "fn main(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { for j in 0..i { s = s + add1(j); } }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    for (int64_t n = 0; n <= 8; ++n) {
+        int64_t want = 0;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < i; ++j) want += j + 1;
+        assert(f(n) == want);
+    }
+    return 0;
+}
+
+int e7_boundary_zero_trip_inner_and_outer() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn main(n: i32, m: i32) -> i32 {\n"
+        "    var s = 100;\n"
+        "    for i in 0..n { for j in 0..m { s = s + 1; } }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    using Fn2 = int64_t (*)(int64_t, int64_t);
+    auto f = reinterpret_cast<Fn2>(static_cast<char*>(p) + entry);
+    assert(f(0, 5) == 100);    // outer zero-trip
+    assert(f(5, 0) == 100);    // inner zero-trip every iteration
+    assert(f(-3, 5) == 100);   // negative outer bound
+    assert(f(5, -3) == 100);   // negative inner bound
+    assert(f(2, 3) == 106);    // 2*3 increments
+    return 0;
+}
+
+int e7_integration_nested_with_branch_body() {
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    // A branch inside the INNER body (a select nested inside a loop
+    // nested inside a loop) — ownership, scoping, and both loops'
+    // machinery interact.
+    void* p = compile_module_to_executable(
+        "fn main(n: i32, m: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n {\n"
+        "        for j in 0..m {\n"
+        "            if i > j { s = s + i; } else { s = s + j; }\n"
+        "        }\n"
+        "    }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);
+    using Fn2 = int64_t (*)(int64_t, int64_t);
+    auto f = reinterpret_cast<Fn2>(static_cast<char*>(p) + entry);
+    for (int64_t n : {0LL, 1LL, 4LL}) {
+        for (int64_t m : {0LL, 1LL, 3LL}) {
+            int64_t want = 0;
+            for (int64_t i = 0; i < n; ++i)
+                for (int64_t j = 0; j < m; ++j)
+                    want += (i > j) ? i : j;
+            assert(f(n, m) == want);
+        }
+    }
+    return 0;
+}
+
+int e7_deopt_bare_call_emitted_and_stable() {
+    // A result-unused call inside a loop is reachable ONLY through
+    // the effect chain: the harness's call-count guard proves it was
+    // emitted (compile fails loudly otherwise); repeatability proves
+    // no state leaks between calls.
+    jit::MemManager mem;
+    std::string err;
+    size_t entry = 0, arity = 0;
+    void* p = compile_module_to_executable(
+        "fn tick(v: i32) -> i32 { return v + 1; }\n"
+        "fn main(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { tick(i); s = s + 2; }\n"
+        "    return s;\n"
+        "}\n",
+        mem, entry, arity, err);
+    assert(p != nullptr);      // call-count guard ran inside
+    auto f = reinterpret_cast<Fn1>(static_cast<char*>(p) + entry);
+    assert(f(0) == 0);
+    assert(f(5) == 10);
+    assert(f(20) == 40);
+    const int64_t first = f(7);
+    for (int i = 0; i < 100; ++i) assert(f(7) == first);
+    return 0;
+}
+
 // ---- E4: branch/select emission (executed correctness) ----
 
 int e4_minimal_if_else_selects() {
@@ -863,6 +998,11 @@ int main() {
     e6_boundary_callee_saved_across_call_in_loop();
     e6_integration_recursion_and_mutual_recursion();
     e6_deopt_repeated_calls_stable_no_state_leak();
-    std::printf("exec_codegen regression tests passed (30 assertions OK)\n");
+    e7_minimal_nested_loop_executes();
+    e7_variant_triangular_bounds_and_call();
+    e7_boundary_zero_trip_inner_and_outer();
+    e7_integration_nested_with_branch_body();
+    e7_deopt_bare_call_emitted_and_stable();
+    std::printf("exec_codegen regression tests passed (35 assertions OK)\n");
     return 0;
 }

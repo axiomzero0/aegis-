@@ -99,12 +99,15 @@ void LinearScanAllocator::compute_intervals(std::vector<LiveInterval>& out) {
         if (mf_.instrs[i].op != "call") continue;
         for (VRegId v = 0; v <= max_v; ++v) {
             if (first[v] == 0xFFFFFFFFu) continue;
-            // Strictly ACROSS: an operand whose LAST read is this call
-            // (last == i) is consumed by the argument moves and does
-            // not need to survive it; marking it call-spanning forced
-            // every call argument into the 5 callee-saved registers
-            // and spilled real cross-call values.
-            if (first[v] <= i && i < last[v]) spans_call[v] = 1;
+            // Strictly ACROSS on BOTH ends: an operand whose last
+            // read is this call (last == i) is consumed by the
+            // argument moves, and a value DEFINED by this call
+            // (first == i) starts existing at its return — neither
+            // needs to survive the call. The inclusive-left test
+            // marked every call result call-spanning and burned a
+            // callee-saved home per call (found via the nested-loop
+            // + call case's spill dump).
+            if (first[v] < i && i < last[v]) spans_call[v] = 1;
         }
     }
     for (VRegId v = 0; v <= max_v; ++v) {

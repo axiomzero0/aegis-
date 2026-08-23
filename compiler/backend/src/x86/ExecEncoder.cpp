@@ -90,7 +90,8 @@ constexpr uint8_t kSetccGt{0x9F};
 constexpr uint8_t kModrmAl{0xC0};
 
 // Registers by Intel encoding id (x86-64 GPR file).
-constexpr uint16_t kRegRax{0}, kRegRcx{1}, kRegRdx{2}, kRegRbx{3};
+constexpr uint16_t kRegRax{0}, kRegRcx{1}, kRegRdx{2}, kRegRbx{3},
+              kRegRbp{5};  // NOLINT(magic-numbers) Intel reg encodings
 constexpr uint16_t kRegRsi{6}, kRegRdi{7};
 constexpr uint16_t kRegR8{8}, kRegR9{9}, kRegR10{10}, kRegR11{11};
 constexpr uint16_t kRegR12{12}, kRegR13{13}, kRegR14{14}, kRegR15{15};
@@ -107,7 +108,7 @@ constexpr uint16_t kRegR12{12}, kRegR13{13}, kRegR14{14}, kRegR15{15};
 /// (cycle-safe, RAX scratch) before any body instruction.
 constexpr uint16_t kHomeRegs[kExecHomeRegCount] = {
     kRegRcx, kRegRsi, kRegRdi, kRegR8, kRegR9, kRegR10, kRegR11,
-    kRegRbx, kRegR12, kRegR13, kRegR14, kRegR15,
+    kRegRbx, kRegRbp, kRegR12, kRegR13, kRegR14, kRegR15,
 };
 /// First home index whose register is callee-saved.
 constexpr uint32_t kFirstCalleeSavedHome{7};

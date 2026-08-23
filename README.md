@@ -137,7 +137,7 @@ was intended — Rule 52), and commit it together with the pass change.
 
 | Rule | Where |
 |------|-------|
-| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (50 tests, 10 bugs) + `tests/unit/test_exec_codegen.cpp` (30 assertions, 6 bug classes) |
+| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (50 tests, 10 bugs) + `tests/unit/test_exec_codegen.cpp` (35 assertions, 7 bug classes) |
 | Rule 37 (golden tests per pass) | `tests/integration/golden/` (31 passes × ≥10, both modes) |
 | Rule 38 (differential testing in CI) | `tests/integration/run_differential.py` + CI |
 | Rule 39 (weekly deopt-path testing) | CI `schedule:` job (extended corpus) |

@@ -55,8 +55,10 @@ namespace aegis::backend::x86 {
 // the allocator's num_gpr so preg ids line up with the home table.
 // Homes 0..6 are caller-saved (clobbered by calls); pass 7 as the
 // allocator's callee_saved_from when the function contains calls.
-inline constexpr uint16_t kExecHomeRegCount{12};
-/// First home index whose register survives a call (callee-saved).
+inline constexpr uint16_t kExecHomeRegCount{13};
+/// First home index whose register survives a call (callee-saved):
+/// RBX, RBP, R12-R15 — six homes (RBP is callee-saved in SysV and the
+/// generated code never needs it as a frame pointer).
 inline constexpr uint16_t kExecFirstCalleeSaved{7};
 
 // One function in a linked executable module.

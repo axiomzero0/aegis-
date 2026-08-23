@@ -260,6 +260,13 @@ int interp_stmts(const ASTNode& n, std::vector<int64_t>& env,
             env.pop_back();
             return exited ? 1 : 0;
         }
+        case ASTKind::ExprStmt: {
+            // Bare expression statement (a call whose result is
+            // discarded): execute for its effect, drop the value.
+            const auto& s = static_cast<const ASTExprStmt&>(n);
+            if (s.expr) (void)interp_expr_sym(*s.expr, env, names, ctx);
+            return 0;
+        }
         case ASTKind::ReturnStmt: {
             const auto& s = static_cast<const ASTReturnStmt&>(n);
             exit_value = s.value
@@ -395,6 +402,32 @@ struct CompiledCase {
         }
         out.ir_nodes += st.graph.size();
         st.mf = InstrSelector(st.graph).lower("f");
+        // NO-SILENT-DROP GUARD (Rule D.3): every LIVE call node in the
+        // IR must appear as a `call` instruction. A dropped call (its
+        // result unused and the effect chain never walked) would
+        // silently vanish — this count check makes it a loud failure.
+        {
+            size_t ir_calls = 0;
+            for (NodeId q = 0; q < st.graph.size(); ++q) {
+                const Node& n = st.graph[q];
+                if (n.flags.has(NodeFlagBit::IsDead)) continue;
+                if (n.kind == NodeKind::CallPure ||
+                    n.kind == NodeKind::CallAltered ||
+                    n.kind == NodeKind::CallCrowded) {
+                    ++ir_calls;
+                }
+            }
+            size_t mf_calls = 0;
+            for (const auto& mi : st.mf.instrs) {
+                if (mi.op == "call") ++mf_calls;
+            }
+            if (ir_calls != mf_calls) {
+                err = name + ": fn " + syms.at(st.symbol).data() +
+                      " dropped calls (IR " + std::to_string(ir_calls) +
+                      " vs machine " + std::to_string(mf_calls) + ")";
+                return false;
+            }
+        }
         fn_states.push_back(std::move(st));
     }
     if (fn_states.empty()) { err = name + ": no functions"; return false; }
@@ -611,6 +644,28 @@ struct CaseSpec {
          "}\n"
          "fn main(n: i32) -> i32 { return ping(n) + pong(n + 1); }\n",
          {{0}, {1}, {2}, {9}, {20}}},
+        {"rt_loop_nested",
+         "fn main(n: i32, m: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { for j in 0..m { s = s + i * j + 1; } }\n"
+         "    return s;\n"
+         "}\n",
+         {{0, 0}, {2, 3}, {4, 4}, {5, 0}, {3, -2}}},
+        {"rt_loop_nested_tri",
+         "fn main(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { for j in 0..i { s = s + j; } }\n"
+         "    return s;\n"
+         "}\n",
+         {{0}, {1}, {4}, {8}, {12}}},
+        {"rt_call_loop_bare",
+         "fn tick(v: i32) -> i32 { return v + 1; }\n"
+         "fn main(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { tick(i); s = s + 2; }\n"
+         "    return s;\n"
+         "}\n",
+         {{0}, {1}, {5}, {20}, {-3}}},
         {"rt_loop_sum",
          "fn f(n: i32) -> i32 {\n"
          "    var s = 0;\n"

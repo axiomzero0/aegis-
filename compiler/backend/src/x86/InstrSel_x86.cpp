@@ -541,17 +541,17 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                     g_[g_[top_node].inputs[0]].kind == NodeKind::Region) {
                     stack.pop_back();
                     if (state[top_node] == g_VisitDone) continue;
-                    // The region emitter works from its own 'emitted'
-                    // view; mirror state into it lazily via a local
-                    // vector shared through the call.
+                    // The region emitter works from an 'emitted' view;
+                    // mirror the scheduler's visit state into it and
+                    // back (single-source tracking, two views).
                     std::vector<uint8_t> emitted(g_.size(), 0);
                     for (NodeId q = 0; q < g_.size(); ++q) {
                         if (state[q] == g_VisitDone) emitted[q] = 1;
                     }
                     emitted[top_node] = 1;
-                    emit_select_region(top_node, per_node, instr_of,
-                                       emitted, vreg_per_node, next_vreg,
-                                       mf);
+                    EmitCtx c{&per_node, &instr_of, &emitted,
+                              &vreg_per_node, &next_vreg, &mf};
+                    emit_select_region(top_node, c);
                     for (NodeId q = 0; q < g_.size(); ++q) {
                         if (emitted[q] != 0) state[q] = g_VisitDone;
                     }
@@ -687,23 +687,22 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
     return mf;
 }
 
-// (namespace continues — structured loop emitter below)
-
 // ============================================================
-// Structured loop emission.
+// Structured emission (loops, selects, effect chain).
 // ============================================================
 //
 // The canonical source-level loop shape (from the for-statement
-// lowering) is:
+// lowering):
 //
 //     Loop(back=body_ctrl, entry)
 //       phi_k = phi(Loop, {entry_k, back_k})
 //       cond  = cmp(phi_primary, bound)
 //       If(Loop, cond) -> Proj0 (body ctrl) ... body ... back to Loop
-//                       -> Proj1 (exit ctrl)
+//                       -> Proj1 (exit ctrl); eff_phi = phi(Proj1,
+//                                             {entry_eff, body_eff})
 //
-// Emitted machine code per loop (all phis hold machine registers for
-// the whole loop; updates happen IN PLACE at the back edge):
+// One loop's region (all phis hold machine registers for the whole
+// loop; updates happen IN PLACE at the back edge):
 //
 //     <preheader>   mov v(phi_k), v(entry_k)        ; per phi
 //     head:         <body closure, topo order>       ; phis are leaves
@@ -715,384 +714,468 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
 // SOUNDNESS: the phi register holds the CURRENT iteration's value
 // during the body (updates come last); at the jz-taken exit it holds
 // the value the NEXT iteration would have entered with — exactly the
-// post-loop read convention of the lowering. Body computations are
-// pure and are fully recomputed each iteration.
+// post-loop read convention of the lowering.
+//
+// NESTED loops: when a body closure walk reaches an inner loop's
+// phi, the inner loop's REGION is emitted recursively at that point
+// (its preheader inits re-run every outer iteration — correct, they
+// are inside the outer body), and the inner phi is then a leaf whose
+// vreg the inner machinery defines.
+//
+// SIDE-EFFECT ORDER: result-unused calls are reachable only through
+// the EFFECT CHAIN, never from data roots. The structured path walks
+// the chain from the return's effect input as ordered EVENTS
+// (pre-loop calls ... loop barrier ... post-loop calls): a barrier
+// emits its loop region (whose body roots include the body effect
+// tail, emitting the body's calls INSIDE the region, in chain
+// order). Without this, `for i in 0..n { tick(i); s = s + 2; }`
+// silently dropped tick entirely — enforced loudly by the harness's
+// IR-call-count == MF-call-count guard.
+
 namespace {
+
+// Is this node one of the three Call kinds?
+bool is_call_kind(NodeKind k) noexcept {
+    return k == NodeKind::CallPure || k == NodeKind::CallAltered ||
+           k == NodeKind::CallCrowded;
+}
+
+// Is this node an EFFECT-MERGE phi (the lowering's loop-exit effect
+// merge: a phi whose region input is a control Proj, not a Region or
+// Loop)? It carries no instruction and no vreg; a walk reaching it
+// passes through to its two effect values.
+bool is_eff_merge_phi(const Graph& g, NodeId id) {
+    if (id >= g.size()) return false;
+    const Node& n = g[id];
+    return n.kind == NodeKind::Phi && !n.inputs.empty() &&
+           n.inputs[0] < g.size() &&
+           g[n.inputs[0]].kind == NodeKind::Proj;
+}
 
 } // namespace
 
-// ---- Shared emission helpers (flat + structured paths). ----
+VRegId InstrSelector::vreg_of_node(NodeId id, EmitCtx& c) {
+    if (id >= g_.size()) return kInvalidVReg;
+    if ((*c.vreg_of)[id] != kInvalidVReg) return (*c.vreg_of)[id];
+    return (*c.vreg_of)[id] = (*c.next_vreg)++;
+}
 
-// Iterative post-order emission of one value's computation closure.
-// Skips loop phis (pre-defined) and follows call-value projections;
-// nested select phis recurse into branch regions.
-void InstrSelector::emit_value_closure(
-    NodeId root, const std::vector<NodeInstr>& per_node,
-    const std::vector<int64_t>& instr_of, std::vector<uint8_t>& emitted,
-    std::vector<VRegId>& vreg_of, VRegId& next_vreg,
-    MachineFunction& mf) {
+void InstrSelector::emit_value_closure(NodeId root, EmitCtx& c,
+                                       NodeId eff_scope) {
     if (root == kInvalidNodeId || root >= g_.size()) return;
-    // A call's VALUE projection carries no instruction: follow it to
-    // the call so arm closures rooted at projections actually emit
-    // (pre-fix the closure no-op'd and the call silently vanished —
-    // the guard could not see it because the vreg linkage still
-    // resolved; observed as a wrong mutual-recursion result).
-    if (instr_of[root] == -1 && is_call_value_proj(g_, root)) {
-        root = g_[root].inputs[0];
-    }
-    if (instr_of[root] != -1 && emitted[root] == 0) {
-        struct Frame { NodeId node; bool expanded; };
-        std::vector<Frame> st;
-        std::vector<uint8_t> onpath(g_.size(), 0);
-        st.push_back(Frame{root, false});
-        while (!st.empty()) {
-            const NodeId node = st.back().node;
-            // Nested select: branch region.
-            if (is_select_phi(g_, node)) {
-                st.pop_back();
-                if (emitted[node] == 0) {
-                    emitted[node] = 1;
-                    emit_select_region(node, per_node, instr_of, emitted,
-                                       vreg_of, next_vreg, mf);
-                }
-                continue;
-            }
-            if (!st.back().expanded) {
-                st.back().expanded = true; // BEFORE pushes (Rule 73)
-                if (onpath[node] == 0) onpath[node] = 1;
-                const auto& ins = g_[node].inputs;
-                for (size_t k = ins.size(); k-- > 0;) {
-                    NodeId in = ins[k];
-                    if (in == kInvalidNodeId || in >= g_.size()) continue;
-                    if (is_loop_phi_pub(g_, in)) continue; // pre-defined
-                    if (instr_of[in] == -1) {
-                        // Follow call-value projections to the call.
-                        if (!is_call_value_proj(g_, in)) continue;
-                        in = g_[in].inputs[0];
-                        if (in >= g_.size() || instr_of[in] == -1) continue;
-                    }
-                    if (emitted[in] != 0) continue;
-                    if (onpath[in] != 0) continue;
-                    st.push_back(Frame{in, false});
-                }
-                continue;
-            }
-            st.pop_back();
-            if (emitted[node] != 0) continue;
-            emitted[node] = 1;
-            mf.instrs.push_back(
-                per_node[static_cast<size_t>(instr_of[node])].mi);
+
+    // Root-level special cases.
+    if (is_loop_phi_pub(g_, root)) {
+        // Defined by its loop's machinery: make sure the region exists.
+        const NodeId loop = g_[root].inputs[0];
+        if (loop < g_.size() && loop_emitted_[loop] == 0) {
+            emit_loop_region(loop, c);
         }
+        return;
+    }
+    if (is_call_value_proj(g_, root)) {
+        root = g_[root].inputs[0]; // follow to the call
+    }
+    if (is_eff_merge_phi(g_, root)) {
+        // Pass through to both effect values (pre-loop and body tail;
+        // the loop region emits the body side once it runs).
+        emit_value_closure(g_[root].inputs[1], c, eff_scope);
+        if (g_[root].inputs.size() >= ir::shape::kPhiInputs2Branches) {
+            emit_value_closure(g_[root].inputs[2], c, eff_scope);
+        }
+        return;
+    }
+    if ((*c.instr_of)[root] == -1) return;      // structural: no instr
+    if ((*c.emitted)[root] != 0) return;
+
+    struct Frame { NodeId node; bool expanded; };
+    std::vector<Frame> st;
+    std::vector<uint8_t> onpath(g_.size(), 0);
+    st.push_back(Frame{root, false});
+
+    // Push one child if it will produce an instruction (following
+    // call-value projections through to the call).
+    auto try_push = [&](NodeId in) {
+        if (in == kInvalidNodeId || in >= g_.size()) return;
+        if (is_loop_phi_pub(g_, in)) {
+            // Inner loop's phi: emit its region NOW (this is where the
+            // nested loop executes), then it is a leaf.
+            const NodeId loop = g_[in].inputs[0];
+            if (loop < g_.size() && loop_emitted_[loop] == 0) {
+                emit_loop_region(loop, c);
+            }
+            return;
+        }
+        if (is_call_value_proj(g_, in)) {
+            in = g_[in].inputs[0];
+            if (in >= g_.size()) return;
+        }
+        if ((*c.instr_of)[in] == -1) return;
+        if ((*c.emitted)[in] != 0) return;
+        if (onpath[in] != 0) return;
+        st.push_back(Frame{in, false});
+    };
+
+    while (!st.empty()) {
+        const NodeId node = st.back().node;
+
+        // Select phi -> guarded branch region.
+        if (is_select_phi(g_, node)) {
+            st.pop_back();
+            if ((*c.emitted)[node] == 0) {
+                (*c.emitted)[node] = 1;
+                emit_select_region(node, c);
+            }
+            continue;
+        }
+        if (is_eff_merge_phi(g_, node)) {
+            // Pass through (a merge reached as a child of a call's
+            // effect edge).
+            st.pop_back();
+            emit_value_closure(g_[node].inputs[1], c, eff_scope);
+            if (g_[node].inputs.size() >= ir::shape::kPhiInputs2Branches) {
+                emit_value_closure(g_[node].inputs[2], c, eff_scope);
+            }
+            continue;
+        }
+
+        if (!st.back().expanded) {
+            st.back().expanded = true; // BEFORE pushes (Rule 73)
+            if (onpath[node] == 0) onpath[node] = 1;
+            const auto& ins = g_[node].inputs;
+            for (size_t k = ins.size(); k-- > 0;) {
+                NodeId in = ins[k];
+                // Scoped effect descent: when walking a select arm's
+                // effect calls, do not chase effect edges out of the
+                // arm (a pre-branch call must stay outside the guarded
+                // region — first-writer emission would otherwise place
+                // it inside).
+                if (k == 1 && !g_[node].is_pure() &&
+                    eff_scope != kInvalidNodeId &&
+                    (in >= g_.size() || g_[in].ctrl_in() != eff_scope)) {
+                    continue;
+                }
+                if (is_eff_merge_phi(g_, in)) {
+                    // Effect merges reached as children pass through.
+                    try_push(g_[in].inputs[1]);
+                    if (g_[in].inputs.size() >= ir::shape::kPhiInputs2Branches) {
+                        try_push(g_[in].inputs[2]);
+                    }
+                    continue;
+                }
+                try_push(in);
+            }
+            continue;
+        }
+        st.pop_back();
+        if ((*c.emitted)[node] != 0) continue;
+        (*c.emitted)[node] = 1;
+        c.mf->instrs.push_back(
+            (*c.per_node)[static_cast<size_t>((*c.instr_of)[node])].mi);
     }
 }
 
-// Emit a merge-phi as a REAL branch region: cond; jz L_else;
-// then-closure; mov dst,then; jmp L_end; L_else:; else-closure;
-// mov dst,else; L_end:. Branchless cmov evaluates BOTH arms, which is
-// unsound for non-terminating arms (recursive fib(0) still ran
-// fib(-1)+fib(-2) and overflowed the stack — caught by the runtime
-// differential harness) and effectful arms.
-void InstrSelector::emit_select_region(
-    NodeId phi, const std::vector<NodeInstr>& per_node,
-    const std::vector<int64_t>& instr_of, std::vector<uint8_t>& emitted,
-    std::vector<VRegId>& vreg_of, VRegId& next_vreg,
-    MachineFunction& mf) {
+void InstrSelector::emit_select_region(NodeId phi, EmitCtx& c) {
     const NodeId region = g_[phi].inputs[0];
     const NodeId if_node = governing_if(g_, region);
     if (if_node == kInvalidNodeId) return; // guard rejects downstream
+    if (g_[if_node].inputs.size() != ir::shape::kIfInputs) return;
     const NodeId cond = g_[if_node].inputs[ir::shape::kIfCondIndex];
 
-    auto vreg_for = [&](NodeId id) -> VRegId {
-        if (id >= g_.size()) return kInvalidVReg;
-        if (vreg_of[id] != kInvalidVReg) return vreg_of[id];
-        return vreg_of[id] = next_vreg++;
+    // The If's two projections (arm control).
+    NodeId true_proj = kInvalidNodeId;
+    NodeId false_proj = kInvalidNodeId;
+    for (NodeId u : g_.users_snapshot(if_node)) {
+        if (u >= g_.size() || g_[u].kind != NodeKind::Proj) continue;
+        if (g_[u].payload.proj_index == 0) true_proj = u;
+        else if (g_[u].payload.proj_index == 1) false_proj = u;
+    }
+
+    // Arm effect roots: calls controlled by each projection (a
+    // result-unused call inside a branch is reachable only via the
+    // effect chain). Rooted INSIDE their half, with scoped effect
+    // descent so pre-branch calls are not pulled in.
+    auto arm_effect_calls = [&](NodeId proj) {
+        std::vector<NodeId> out;
+        if (proj == kInvalidNodeId) return out;
+        for (NodeId u : g_.users_snapshot(proj)) {
+            if (u >= g_.size()) continue;
+            if (g_[u].flags.has(NodeFlagBit::IsDead)) continue;
+            if (!is_call_kind(g_[u].kind)) continue;
+            if (g_[u].ctrl_in() != proj) continue;
+            out.push_back(u);
+        }
+        return out;
     };
 
-    // Unique opaque label pair from the select allocator (disjoint
-    // from the structured loop label space; non-negative for the
-    // encoder's id-indexed table).
     const int64_t l_else = static_cast<int64_t>(select_label_next_++);
     const int64_t l_end  = static_cast<int64_t>(select_label_next_++);
     const NodeId then_v = g_[phi].inputs[1];
     const NodeId else_v = g_[phi].inputs[2];
 
-    emit_value_closure(cond, per_node, instr_of, emitted, vreg_of,
-                       next_vreg, mf);
+    emit_value_closure(cond, c);
     {
         MachineInstr jz; jz.op = "jz";
-        jz.uses[0] = vreg_for(cond);
+        jz.uses[0] = vreg_of_node(cond, c);
         jz.has_imm = true; jz.imm = l_else;
-        mf.instrs.push_back(jz);
+        c.mf->instrs.push_back(jz);
     }
-    emit_value_closure(then_v, per_node, instr_of, emitted, vreg_of,
-                       next_vreg, mf);
+    // THEN half: value closure, then its effect calls (scoped).
+    emit_value_closure(then_v, c);
+    for (NodeId call : arm_effect_calls(true_proj)) {
+        emit_value_closure(call, c, true_proj);
+    }
     {
         MachineInstr mv; mv.op = "mov";
-        mv.defs[0] = vreg_for(phi);
-        mv.uses[0] = vreg_for(then_v);
-        mf.instrs.push_back(mv);
+        mv.defs[0] = vreg_of_node(phi, c);
+        mv.uses[0] = vreg_of_node(then_v, c);
+        c.mf->instrs.push_back(mv);
         MachineInstr jp; jp.op = "jmp"; jp.has_imm = true; jp.imm = l_end;
-        mf.instrs.push_back(jp);
+        c.mf->instrs.push_back(jp);
         MachineInstr le; le.op = "label"; le.has_imm = true;
         le.imm = l_else;
-        mf.instrs.push_back(le);
+        c.mf->instrs.push_back(le);
     }
-    emit_value_closure(else_v, per_node, instr_of, emitted, vreg_of,
-                       next_vreg, mf);
+    // ELSE half: value closure, then its effect calls (scoped).
+    emit_value_closure(else_v, c);
+    for (NodeId call : arm_effect_calls(false_proj)) {
+        emit_value_closure(call, c, false_proj);
+    }
     {
         MachineInstr mv; mv.op = "mov";
-        mv.defs[0] = vreg_for(phi);
-        mv.uses[0] = vreg_for(else_v);
-        mf.instrs.push_back(mv);
+        mv.defs[0] = vreg_of_node(phi, c);
+        mv.uses[0] = vreg_of_node(else_v, c);
+        c.mf->instrs.push_back(mv);
         MachineInstr le; le.op = "label"; le.has_imm = true;
         le.imm = l_end;
-        mf.instrs.push_back(le);
+        c.mf->instrs.push_back(le);
     }
 }
 
-void InstrSelector::emit_structured_loops(const std::vector<NodeId>& loops,
-                                          std::vector<NodeInstr>& per_node,
-                                          std::vector<VRegId>& vreg_per_node,
-                                          VRegId& next_vreg,
-                                          MachineFunction& mf) {
-    // instr index per node id (shared, built by lower()).
-    std::vector<int64_t> instr_of(instr_of_shared_);
+void InstrSelector::emit_loop_region(NodeId loop, EmitCtx& c) {
+    if (loop >= g_.size() || loop_emitted_[loop] != 0) return;
+    loop_emitted_[loop] = 1;
 
-    // Vreg assignment is SHARED with the collection phase (the map
-    // is passed in): nodes the selector already touched keep their
-    // ids — a fresh map here would double-assign the phi registers and
-    // silently disconnect the loop body from its phis (caught by the
-    // executed differential harness).
-    std::vector<VRegId>& vreg_of = vreg_per_node;
-    auto vreg_for = [&](NodeId id) -> VRegId {
-        if (id >= g_.size()) return kInvalidVReg;
-        if (vreg_of[id] != kInvalidVReg) return vreg_of[id];
-        VRegId v = next_vreg++;
-        vreg_of[id] = v;
-        return v;
-    };
+    // The loop's phis, exit If, and exit condition.
+    std::vector<NodeId> phis;
+    NodeId exit_if = kInvalidNodeId;
+    for (NodeId u : g_.users_snapshot(loop)) {
+        if (u >= g_.size()) continue;
+        if (g_[u].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g_[u].kind == NodeKind::Phi && !g_[u].inputs.empty() &&
+            g_[u].inputs[0] == loop) {
+            phis.push_back(u);
+        } else if (g_[u].kind == NodeKind::If && g_[u].ctrl_in() == loop) {
+            exit_if = u;
+        }
+    }
+    NodeId cond = kInvalidNodeId;
+    if (exit_if != kInvalidNodeId &&
+        g_[exit_if].inputs.size() == ir::shape::kIfInputs) {
+        cond = g_[exit_if].inputs[ir::shape::kIfCondIndex];
+    }
 
+    // Body effect tail: the loop's effect-merge phi hangs off the exit
+    // projection; its back value is the last effect node in the body.
+    NodeId eff_root = kInvalidNodeId;
+    if (exit_if != kInvalidNodeId) {
+        for (NodeId proj : g_.users_snapshot(exit_if)) {
+            if (proj >= g_.size() || g_[proj].kind != NodeKind::Proj)
+                continue;
+            for (NodeId m : g_.users_snapshot(proj)) {
+                if (m >= g_.size() || g_[m].kind != NodeKind::Phi)
+                    continue;
+                if (!g_[m].inputs.empty() && g_[m].inputs[0] == proj &&
+                    g_[m].inputs.size() >=
+                        ir::shape::kPhiInputs2Branches) {
+                    eff_root = g_[m].inputs[2];
+                }
+            }
+        }
+    }
+
+    const int64_t head_label = static_cast<int64_t>(loop_label_next_++);
+    const int64_t exit_label = static_cast<int64_t>(loop_label_next_++);
+
+    // Preheader: entry closures + init movs. CONSTANT entries
+    // rematerialize as mov_imm instead of copying a constant vreg:
+    // a phi initialized from a constant would otherwise keep that
+    // constant's register live across the WHOLE enclosing loop (and
+    // across any call in it, burning a callee-saved home — found via
+    // the nested-loop spill dump).
+    for (NodeId phi : phis) {
+        if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
+            continue;
+        const NodeId entry = g_[phi].inputs[1];
+        MachineInstr init;
+        init.defs[0] = vreg_of_node(phi, c);
+        if (entry < g_.size() &&
+            g_[entry].kind == NodeKind::Constant) {
+            init.op = "mov_imm";
+            init.has_imm = true;
+            init.imm = g_[entry].payload.i64;
+        } else {
+            emit_value_closure(entry, c);
+            init.op = "mov";
+            init.uses[0] = vreg_of_node(entry, c);
+        }
+        c.mf->instrs.push_back(init);
+    }
+
+    // Head label.
+    {
+        MachineInstr lab; lab.op = "label"; lab.has_imm = true;
+        lab.imm = head_label;
+        c.mf->instrs.push_back(lab);
+    }
+
+    // Body closure. ORDER MATTERS for register pressure: the body's
+    // CALLS emit first (effect-chain order — their result-unused
+    // instances are reachable only from here), then the PURE
+    // back-value computations and the exit condition. Pure placement
+    // is free in a sea of nodes; emitting them AFTER the calls keeps
+    // their intervals from spanning the call, so they stay in
+    // caller-saved homes (emitting them first forced every body
+    // temporary callee-saved and spilled — caught by the bare-call
+    // bench case the moment the call-count guard made it runnable).
+    emit_value_closure(eff_root, c);
+    for (NodeId phi : phis) {
+        if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
+            continue;
+        emit_value_closure(g_[phi].inputs[2], c);
+    }
+    emit_value_closure(cond, c);
+
+    // Exit check + back-edge updates + jump.
+    {
+        MachineInstr jz; jz.op = "jz";
+        if (cond != kInvalidNodeId && cond < g_.size()) {
+            jz.uses[0] = vreg_of_node(cond, c);
+        }
+        jz.has_imm = true; jz.imm = exit_label;
+        c.mf->instrs.push_back(jz);
+    }
+    for (NodeId phi : phis) {
+        if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
+            continue;
+        MachineInstr upd; upd.op = "mov";
+        upd.defs[0] = vreg_of_node(phi, c);
+        upd.uses[0] = vreg_of_node(g_[phi].inputs[2], c);
+        c.mf->instrs.push_back(upd);
+    }
+    {
+        MachineInstr jmp; jmp.op = "jmp"; jmp.has_imm = true;
+        jmp.imm = head_label;
+        c.mf->instrs.push_back(jmp);
+    }
+    {
+        MachineInstr lab; lab.op = "label"; lab.has_imm = true;
+        lab.imm = exit_label;
+        c.mf->instrs.push_back(lab);
+    }
+}
+
+void InstrSelector::emit_structured_loops(
+    const std::vector<NodeId>& loops, std::vector<NodeInstr>& per_node,
+    std::vector<VRegId>& vreg_per_node, VRegId& next_vreg,
+    MachineFunction& mf) {
+    (void)loops;
+    // Per-function emission state.
+    loop_emitted_.assign(g_.size(), 0);
+    loop_label_next_ = 0;
     std::vector<uint8_t> emitted(g_.size(), 0);
+    EmitCtx c{&per_node, &instr_of_shared_, &emitted, &vreg_per_node,
+              &next_vreg, &mf};
 
     // ---- Prologue: ALL parameter instructions first. ----
-    // A `param` reads its ABI ARGUMENT register; those registers are
-    // also vreg homes and may be overwritten inside loops/bodies, so
-    // params must execute exactly once at entry — never inside a loop
-    // body (the closure walk below would otherwise pull a param in
-    // wherever its value is first used, re-reading a clobbered
-    // register; caught by inspection of the emitted stream).
+    // ABI argument registers are also vreg homes; params execute
+    // exactly once at entry, never inside a loop body.
     for (const auto& ni : per_node) {
         if (ni.mi.op != "param") continue;
         mf.instrs.push_back(ni.mi);
         emitted[ni.node] = 1;
     }
 
-    // Topo-emit the computation closure of `roots` (explicit-stack
-    // post-order). Leaves: nodes with no collected instruction, nodes
-    // already emitted, and loop phis (their registers are defined by
-    // the loop machinery, and their inputs are NOT followed — that is
-    // where the cycle lives).
-    auto emit_closure = [&](const std::vector<NodeId>& roots) {
-        struct Frame { NodeId node; bool expanded; };
-        std::vector<Frame> st;
-        std::vector<uint8_t> onpath(g_.size(), 0);
-        for (NodeId r : roots) {
-            if (r == kInvalidNodeId || r >= g_.size()) continue;
-            if (instr_of[r] == -1 || emitted[r] != 0 ||
-                is_loop_phi_pub(g_, r))
-                continue;
-            // Owned nodes emit inside their select's branch region.
-            if (select_global_owner_[r] != kInvalidNodeId &&
-                !is_select_phi(g_, r))
-                continue;
-            if (onpath[r] == 0) st.push_back(Frame{r, false});
-        }
-        while (!st.empty()) {
-            const NodeId node = st.back().node;
-            // SELECT PHI inside a loop body: branch region (same
-            // soundness rationale as the flat path — cmov evaluates
-            // both arms).
-            if (g_[node].kind == NodeKind::Phi &&
-                g_[node].inputs.size() ==
-                    ir::shape::kPhiInputs2Branches &&
-                g_[node].inputs[0] < g_.size() &&
-                g_[g_[node].inputs[0]].kind == NodeKind::Region) {
-                st.pop_back();
-                if (emitted[node] == 0) {
-                    emitted[node] = 1;
-                    emit_select_region(node, per_node, instr_of, emitted,
-                                       vreg_per_node, next_vreg, mf);
-                }
-                continue;
-            }
-            if (!st.back().expanded) {
-                st.back().expanded = true; // BEFORE pushes (Rule 73)
-                onpath[node] = 1;
-                const auto& ins = g_[node].inputs;
-                for (size_t k = ins.size(); k-- > 0;) {
-                    NodeId in = ins[k];
-                    if (in == kInvalidNodeId || in >= g_.size()) continue;
-                    // A call's VALUE projection carries no instruction
-                    // (its vreg is the call's result): follow THROUGH
-                    // it so the call itself is emitted — skipping it
-                    // left calls inside loop bodies unemitted and the
-                    // guard rejected the undefined result (Rule D.3).
-                    if (instr_of[in] == -1) {
-                        if (!is_call_value_proj(g_, in)) continue;
-                        in = g_[in].inputs[0]; // the call itself
-                        if (instr_of[in] == -1) continue;
-                    }
-                    // Owned children emit inside their select.
-                    if (select_global_owner_[in] != kInvalidNodeId &&
-                        !is_select_phi(g_, in)) {
-                        continue;
-                    }
-                    if (emitted[in] != 0) continue;
-                    if (is_loop_phi_pub(g_, in)) continue; // cycle cut
-                    if (onpath[in] != 0) continue;
-                    if (instr_of[in] == -1) continue;
-                    st.push_back(Frame{in, false});
-                }
-                // A select phi's condition lives on the governing If,
-                // not among the phi's inputs — visit it explicitly (the
-                // flat scheduler carries the same special case; without
-                // it the compare is never emitted and the select reads
-                // an undefined register).
-                if (g_[node].kind == NodeKind::Phi &&
-                    ins.size() == ir::shape::kPhiInputs2Branches &&
-                    ins[0] < g_.size() &&
-                    g_[ins[0]].kind == NodeKind::Region) {
-                    const NodeId gif = governing_if(g_, ins[0]);
-                    if (gif != kInvalidNodeId &&
-                        g_[gif].inputs.size() == ir::shape::kIfInputs) {
-                        const NodeId gcond =
-                            g_[gif].inputs[ir::shape::kIfCondIndex];
-                        if (gcond != kInvalidNodeId && gcond < g_.size() &&
-                            instr_of[gcond] != -1 && emitted[gcond] == 0 &&
-                            onpath[gcond] == 0) {
-                            st.push_back(Frame{gcond, false});
-                        }
-                    }
-                }
-                continue;
-            }
-            st.pop_back();
-            if (emitted[node] != 0) continue;
-            emitted[node] = 1;
-            mf.instrs.push_back(per_node[static_cast<size_t>(
-                instr_of[node])].mi);
-        }
-    };
-
-    // Label ids: 2*i = head of loops[i], 2*i+1 = exit of loops[i].
-    for (size_t li = 0; li < loops.size(); ++li) {
-        const NodeId loop = loops[li];
-        const int64_t head_label = static_cast<int64_t>(2 * li);
-        const int64_t exit_label = static_cast<int64_t>(2 * li + 1);
-
-        // The loop's phis and its exit If.
-        std::vector<NodeId> phis;
-        NodeId exit_if = kInvalidNodeId;
-        for (NodeId u : g_.users_snapshot(loop)) {
-            if (u >= g_.size()) continue;
-            if (g_[u].flags.has(NodeFlagBit::IsDead)) continue;
-            if (g_[u].kind == NodeKind::Phi &&
-                !g_[u].inputs.empty() && g_[u].inputs[0] == loop) {
-                phis.push_back(u);
-            } else if (g_[u].kind == NodeKind::If &&
-                       g_[u].ctrl_in() == loop) {
-                exit_if = u;
-            }
-        }
-        // Exit condition node (0/1 selector value).
-        NodeId cond = kInvalidNodeId;
-        if (exit_if != kInvalidNodeId &&
-            g_[exit_if].inputs.size() == ir::shape::kIfInputs) {
-            cond = g_[exit_if].inputs[ir::shape::kIfCondIndex];
-        }
-        // No phis or no condition: nothing executable to emit for
-        // this loop — leave its values undefined; the harness guard
-        // reports it loudly rather than emitting wrong code.
-        if (phis.empty() || cond == kInvalidNodeId) continue;
-
-        // ---- Preheader: entry computations + phi inits. ----
-        for (NodeId phi : phis) {
-            if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
-                continue;
-            const NodeId entry = g_[phi].inputs[1];
-            emit_closure({entry});
-            MachineInstr init;
-            init.op = "mov";
-            init.defs[0] = vreg_for(phi);
-            init.uses[0] = vreg_for(entry);
-            mf.instrs.push_back(init);
-        }
-
-        // ---- Head label. ----
-        {
-            MachineInstr lab;
-            lab.op = "label";
-            lab.has_imm = true;
-            lab.imm = head_label;
-            mf.instrs.push_back(lab);
-        }
-
-        // ---- Body: closure of back-edge values + the condition. ----
-        std::vector<NodeId> roots;
-        for (NodeId phi : phis) {
-            if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
-                continue;
-            roots.push_back(g_[phi].inputs[2]); // back value
-        }
-        roots.push_back(cond);
-        emit_closure(roots);
-
-        // ---- Exit check + updates + jump. ----
-        {
-            MachineInstr jz;
-            jz.op = "jz";
-            jz.uses[0] = vreg_for(cond);
-            jz.has_imm = true;
-            jz.imm = exit_label;
-            mf.instrs.push_back(jz);
-        }
-        for (NodeId phi : phis) {
-            if (g_[phi].inputs.size() < ir::shape::kPhiInputs2Branches)
-                continue;
-            MachineInstr upd;
-            upd.op = "mov";
-            upd.defs[0] = vreg_for(phi);
-            upd.uses[0] = vreg_for(g_[phi].inputs[2]);
-            mf.instrs.push_back(upd);
-        }
-        {
-            MachineInstr jmp;
-            jmp.op = "jmp";
-            jmp.has_imm = true;
-            jmp.imm = head_label;
-            mf.instrs.push_back(jmp);
-        }
-        {
-            MachineInstr lab;
-            lab.op = "label";
-            lab.has_imm = true;
-            lab.imm = exit_label;
-            mf.instrs.push_back(lab);
-        }
-    }
-
-    // ---- Post-loop code: the return value's closure. ----
+    // ---- Effect-chain events, in chain order. ----
+    //
+    // Walk BACKWARDS from the return's effect input: each call is an
+    // event; each loop's effect-merge phi is a BARRIER (the loop runs
+    // at its chain position; the global walk continues along the
+    // phi's ENTRY value — the body side is the loop region's own
+    // business). Reversing gives program order.
     NodeId ret_node = kInvalidNodeId;
     for (const auto& ni : per_node) {
         if (ni.mi.op == "ret") { ret_node = ni.node; break; }
     }
+    std::vector<NodeId> events; // forward order after reverse below
+    if (ret_node != kInvalidNodeId) {
+        const Node& rn = g_[ret_node];
+        NodeId cur = rn.inputs.size() >= 2 ? rn.inputs[1]
+                                           : kInvalidNodeId;
+        std::vector<NodeId> rev;
+        uint32_t guard = 0;
+        while (cur != kInvalidNodeId && cur < g_.size() &&
+               guard++ < g_.size()) {
+            if (is_eff_merge_phi(g_, cur)) {
+                rev.push_back(cur); // loop barrier
+                cur = g_[cur].inputs[1]; // entry chain continues
+            } else if (is_call_kind(g_[cur].kind)) {
+                rev.push_back(cur);
+                cur = g_[cur].eff_in();
+            } else {
+                break; // Start projection / structural: chain start
+            }
+        }
+        events.assign(rev.rbegin(), rev.rend());
+    }
+
+    // Execute events forward. Pre-loop calls emit at their position;
+    // a loop barrier emits the loop's whole region (body calls inside,
+    // via the region's own effect roots). Emitted[] dedups across the
+    // data-side and effect-side walks.
+    for (NodeId ev : events) {
+        if (is_eff_merge_phi(g_, ev)) {
+            // The loop owning this merge: its phi's region input is
+            // the exit Proj; the Loop is the Proj's base's ctrl.
+            // Simpler: find the Loop whose user set contains an If
+            // whose proj user is this merge — walk from the merge's
+            // region Proj back to its If, then to the If's ctrl (the
+            // Loop node).
+            const NodeId proj = g_[ev].inputs[0];
+            const NodeId base = proj < g_.size() &&
+                !g_[proj].inputs.empty() ? g_[proj].inputs[0]
+                                         : kInvalidNodeId;
+            if (base != kInvalidNodeId && base < g_.size() &&
+                g_[base].kind == NodeKind::If &&
+                g_[base].inputs.size() >= 1) {
+                const NodeId loop = g_[base].inputs[0];
+                if (loop < g_.size() &&
+                    g_[loop].kind == NodeKind::Loop) {
+                    emit_loop_region(loop, c);
+                }
+            }
+            continue;
+        }
+        emit_value_closure(ev, c);
+    }
+
+    // ---- Any loop not yet emitted (e.g. a degenerate loop whose
+    // value never flows to the return still must RUN its body). ----
+    for (NodeId id = 0; id < g_.size(); ++id) {
+        if (g_[id].flags.has(NodeFlagBit::IsDead)) continue;
+        if (g_[id].kind != NodeKind::Loop) continue;
+        emit_loop_region(id, c);
+    }
+
+    // ---- The return: value closure, effect closure, then the ret. ----
     if (ret_node != kInvalidNodeId) {
         const Node& rn = g_[ret_node];
         if (rn.inputs.size() >= ir::shape::kReturnInputs) {
-            emit_closure({rn.inputs[ir::shape::kReturnValIndex]});
+            emit_value_closure(rn.inputs[ir::shape::kReturnValIndex], c);
+            emit_value_closure(rn.inputs[1], c);
         }
-        mf.instrs.push_back(per_node[static_cast<size_t>(
-            instr_of[ret_node])].mi);
+        mf.instrs.push_back(
+            per_node[static_cast<size_t>(instr_of_shared_[ret_node])].mi);
     }
 }
 

@@ -62,8 +62,11 @@ Legend:
 
 ## Backend-executable status (context)
 
-Straight-line integer arithmetic, branch merges, source-level loops,
-AND CALLS (including recursion and mutual recursion) execute natively.
+Straight-line integer arithmetic, branch merges, source-level loops
+(NESTED loops included, recursively emitted), and CALLS (recursion,
+mutual recursion, and result-unused calls — the latter emit via
+effect-chain event ordering, enforced by an IR-vs-machine call-count
+guard) execute natively.
 ExecEncoder: full ALU/div/shift/setcc set, REAL-BRANCH select lowering
 (a merge phi emits cond/jz/arm-mov/jmp/arm-mov — branchless cmov was
 removed: it evaluates both arms, unsound for non-terminating recursive
@@ -72,9 +75,10 @@ back-edge register updates, `jmp`), SysV call lowering with
 permutation-validated argument parallel-moves and cross-function
 rel32 linking (encode_module), and a call-aware register allocator
 (values live across calls are restricted to callee-saved homes).
-`bench_runtime` (17 cases) proves correctness against an AST
+`bench_runtime` (20 cases) proves correctness against an AST
 interpreter (statement-level, loops + calls) and measures: arithmetic
-4–20 ns/call, loops 10–24 ns/call, calls 5–26 ns/call, recursive
-fib(10) 66 ns/call (73.9x over interpretation). Not yet executable:
-memory operations, nested loops — each rejected loudly by the encoder
-and the harness's no-silent-omission guard, never silently dropped.
+4–20 ns/call, loops 10–26 ns/call, nested loops 12–26 ns/call, calls
+5–26 ns/call, recursive fib(10) 66 ns/call (73.9x over
+interpretation). Not yet executable: memory operations — rejected
+loudly by the encoder and the harness's no-silent-omission guard,
+never silently dropped.
