@@ -1,9 +1,0 @@
-fn a(v: i32) -> i32 {
-    return v + 1;
-}
-fn b(v: i32) -> i32 {
-    return v * 2;
-}
-fn main() -> i32 {
-    return a(1) + b(2);
-}

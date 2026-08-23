@@ -1,0 +1,13 @@
+{
+  "captured": "2026-08-23T02:42:31.530861+00:00",
+  "reason": "Initial loop-capability baseline: adds loop_heavy case; loop body walk fixed from guard-counted (320ms) to visited-set (0.64ms) per Rule 41",
+  "threshold_percent": 5.0,
+  "cases": {
+    "branchy": 257.132,
+    "chain_fold": 203.559,
+    "dedup_heavy": 206.559,
+    "loop_heavy": 681.138,
+    "multi_fn": 318.091,
+    "wide_fold": 184.481
+  }
+}

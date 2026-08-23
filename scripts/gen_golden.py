@@ -381,18 +381,113 @@ SHAPES: list[tuple[str, str]] = [
      _fn("f", "    return (x + 100) * 2 + 5;", "x: i32") + _main("    return f(19);")),
 ]
 
-# Passes whose source-level triggers do not exist yet: allocs (escape,
-# nullptr, RC, PGDLO, value-flow stamps), loops (SCEV, LICM, IVS,
-# unroll, fusion, fission, auto-parallel, mem-pool), stores (DSE),
-# guards/bounds (BCE, speculative BCE), loads (speculative reorder),
-# crowded calls (lock elision). Their goldens pin preservation.
+# ---- Loop passes: source-level `for var in lo..hi` loops (real
+# triggers — the loop passes are reachable from real code now). ----
+def _loop(name, body, lo="0", hi="8", outer=""):
+    src = outer if outer else f"fn f(n: i32) -> i32 {{\n    for i in {lo}..{hi} {{\n{body}\n    }}\n    return 7;\n}}\n"
+    if outer:
+        src = f"fn main() -> i32 {{\n{outer}\n    return 7;\n}}\n"
+    return src
+
+LOOP_TESTS = {
+    "loop_unrolling": [
+        # name, full source (constant trip <= 8 -> eliminated).
+        ("empty_body_constant_trip8_eliminated",
+         "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    return 42;\n}\n"),
+        ("empty_body_constant_trip1_eliminated",
+         "fn main() -> i32 {\n    for i in 0..1 {\n    }\n    return 5;\n}\n"),
+        ("body_ignoring_induction_var_eliminated",
+         "fn main() -> i32 {\n    for i in 0..4 {\n        let dead = 5 + 5;\n    }\n    return 3;\n}\n"),
+        ("var_binding_only_body_eliminated",
+         "fn main() -> i32 {\n    for i in 0..6 {\n        var t = i;\n    }\n    return 2;\n}\n"),
+        ("nested_empty_loops_fully_collapse",
+         "fn main() -> i32 {\n    for i in 0..3 {\n        for j in 0..3 {\n        }\n    }\n    return 9;\n}\n"),
+        # NOT eliminated (sound skips — pinned as positively as the IR allows).
+        ("runtime_bound_loop_kept",
+         "fn f(n: i32) -> i32 {\n    for i in 0..n {\n    }\n    return 7;\n}\nfn main() -> i32 { return f(5); }\n"),
+        ("accumulator_loop_kept",
+         "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\nfn main() -> i32 { return f(8); }\n"),
+        ("call_body_loop_kept",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn f(n: i32) -> i32 {\n    for i in 0..n {\n        g(i);\n    }\n    return 7;\n}\nfn main() -> i32 { return f(8); }\n"),
+        ("trip9_above_threshold_kept",
+         "fn main() -> i32 {\n    for i in 0..9 {\n    }\n    return 1;\n}\n"),
+        ("if_body_reading_var_kept",
+         "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        if i > 4 {\n            s = s + 1;\n        }\n    }\n    return s;\n}\nfn main() -> i32 { return f(9); }\n"),
+    ],
+    "loop_fusion": [
+        ("degenerate_sibling_same_scev_fused",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn main() -> i32 {\n    for i in 0..8 {\n        g(i);\n    }\n    for j in 0..8 {\n    }\n    return 5;\n}\n"),
+        ("both_degenerate_siblings_both_eliminated",
+         "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    for j in 0..8 {\n    }\n    return 6;\n}\n"),
+        ("nested_degenerate_inner_fused",
+         "fn main() -> i32 {\n    for i in 0..3 {\n        for j in 0..3 {\n        }\n    }\n    return 9;\n}\n"),
+        ("different_trip_counts_not_paired",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn main() -> i32 {\n    for i in 0..8 {\n        g(i);\n    }\n    for j in 0..9 {\n    }\n    return 5;\n}\n"),
+        ("different_starts_not_paired",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn main() -> i32 {\n    for i in 0..8 {\n        g(i);\n    }\n    for j in 1..9 {\n    }\n    return 5;\n}\n"),
+        ("non_degenerate_sibling_kept",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn main() -> i32 {\n    for i in 0..8 {\n        g(i);\n    }\n    for j in 0..8 {\n        g(j);\n    }\n    return 5;\n}\n"),
+        ("single_loop_no_pair",
+         "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    return 4;\n}\n"),
+        ("three_loops_cascade",
+         "fn main() -> i32 {\n    for i in 0..4 {\n    }\n    for j in 0..4 {\n    }\n    for k in 0..4 {\n    }\n    return 8;\n}\n"),
+        ("runtime_bounds_pair_kept",
+         "fn f(n: i32) -> i32 {\n    for i in 0..n {\n    }\n    for j in 0..n {\n    }\n    return 7;\n}\nfn main() -> i32 { return f(3); }\n"),
+        ("loop_then_straightline_code",
+         "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    let x = 1;\n    let y = x + 1;\n    return y;\n}\n"),
+    ],
+    "scev": [
+        ("constant_bounds_recurrence_analyzed",
+         "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    return 1;\n}\n"),
+        ("runtime_bounds_structure_pinned",
+         "fn f(n: i32) -> i32 {\n    for i in 0..n {\n    }\n    return 7;\n}\nfn main() -> i32 { return f(5); }\n"),
+        ("nonzero_start_recurrence",
+         "fn main() -> i32 {\n    for i in 2..8 {\n    }\n    return 3;\n}\n"),
+        ("accumulator_two_phis",
+         "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\nfn main() -> i32 { return f(8); }\n"),
+        ("two_accumulators",
+         "fn f(n: i32) -> i32 {\n    var a = 0;\n    var b = 0;\n    for i in 0..n {\n        a = a + i;\n        b = b + 2;\n    }\n    return a + b;\n}\nfn main() -> i32 { return f(4); }\n"),
+        ("nested_loops_two_recs",
+         "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        for j in 0..n {\n            s = s + 1;\n        }\n    }\n    return s;\n}\nfn main() -> i32 { return f(3); }\n"),
+        ("loop_with_call_body",
+         "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn f(n: i32) -> i32 {\n    for i in 0..n {\n        g(i);\n    }\n    return 7;\n}\nfn main() -> i32 { return f(8); }\n"),
+        ("param_bounds_expression",
+         "fn f(n: i32) -> i32 {\n    for i in 0..(n + 2) {\n    }\n    return 7;\n}\nfn main() -> i32 { return f(5); }\n"),
+        ("single_trip_loop",
+         "fn main() -> i32 {\n    for i in 0..1 {\n    }\n    return 6;\n}\n"),
+        ("loop_result_unused_after",
+         "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return 99;\n}\nfn main() -> i32 { return f(8); }\n"),
+    ],
+}
+
+# LICM / IVS / MemPoolSynthesis / AutoParallelization / BoundsCheckElim:
+# real loops whose IR these passes must preserve soundly (their
+# transforms are analysis/telemetry-stage today — documented gaps).
+_LOOP_PRESERVE_SRC = [
+    ("empty_loop_structure", "fn main() -> i32 {\n    for i in 0..8 {\n    }\n    return 1;\n}\n"),
+    ("runtime_bound_loop", "fn f(n: i32) -> i32 {\n    for i in 0..n {\n    }\n    return 7;\n}\nfn main() -> i32 { return f(5); }\n"),
+    ("accumulator_loop", "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\nfn main() -> i32 { return f(8); }\n"),
+    ("call_in_loop_body", "fn g(v: i32) -> i32 {\n    return v + 1;\n}\nfn f(n: i32) -> i32 {\n    for i in 0..n {\n        g(i);\n    }\n    return 7;\n}\nfn main() -> i32 { return f(8); }\n"),
+    ("loop_invariant_pure_in_body", "fn f(a: i32, n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        let x = a * 2;\n        s = s + x;\n    }\n    return s;\n}\nfn main() -> i32 { return f(3, 4); }\n"),
+    ("nested_loops", "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        for j in 0..n {\n            s = s + 1;\n        }\n    }\n    return s;\n}\nfn main() -> i32 { return f(3); }\n"),
+    ("loop_with_branch_body", "fn f(n: i32) -> i32 {\n    var s = 0;\n    for i in 0..n {\n        if i > 4 {\n            s = s + 1;\n        }\n    }\n    return s;\n}\nfn main() -> i32 { return f(9); }\n"),
+    ("two_sequential_loops", "fn main() -> i32 {\n    for i in 0..4 {\n    }\n    for j in 0..6 {\n    }\n    return 2;\n}\n"),
+    ("nonzero_start_loop", "fn main() -> i32 {\n    for i in 2..7 {\n    }\n    return 3;\n}\n"),
+    ("loop_after_prelude", "fn f(n: i32) -> i32 {\n    let base = n * 3;\n    var s = 0;\n    for i in 0..n {\n        s = s + base;\n    }\n    return s;\n}\nfn main() -> i32 { return f(4); }\n"),
+]
+for _p in ["licm", "induction_var_simplification", "mem_pool_synthesis",
+           "auto_parallelization", "bounds_check_elim", "loop_fission"]:
+    LOOP_TESTS[_p] = _LOOP_PRESERVE_SRC
+
+TESTS.update(LOOP_TESTS)
+
+# Escape/NullPtr/RC/DSE still have no source-level triggers (allocs,
+# stores, guards): their preservation suites stay as authored below.
+
 PRESERVATION_PASSES = [
     "escape_analysis", "null_pointer_elimination", "rc_optimization",
-    "scev", "licm", "induction_var_simplification",
-    "loop_unrolling", "loop_fusion", "loop_fission",
-    "bounds_check_elim", "dead_store_elimination",
+    "dead_store_elimination",
 ]
-
 for _i, _pass in enumerate(PRESERVATION_PASSES):
     _names = []
     for _j in range(MIN_PER_PASS):
@@ -727,6 +822,17 @@ def main() -> int:
         research = pass_dir in RESEARCH_DIRS
         out_dir = GOLDEN / pass_dir
         out_dir.mkdir(parents=True, exist_ok=True)
+        # Rule 50/D.2 hygiene: this generator owns the suite — remove
+        # files from a previous generation that the current TESTS table
+        # no longer defines (stale pairs would silently inflate the
+        # Rule 37 census and keep testing deleted scenarios).
+        owned = {f"{name}.in.aegis" for name, _ in entries}
+        owned |= {f"{name}.expected.son" for name, _ in entries}
+        owned |= {f"{name}.expected.aot.son" for name, _ in entries}
+        owned |= {f"{name}.expected.jit.son" for name, _ in entries}
+        for stale in out_dir.iterdir():
+            if stale.is_file() and stale.name not in owned:
+                stale.unlink()
         for name, src in entries:
             in_path = out_dir / f"{name}.in.aegis"
             in_path.write_text(src)

@@ -1,0 +1,8 @@
+fn f(n: i32) -> i32 {
+    var s = 0;
+    for i in 0..n {
+        s = s + i;
+    }
+    return 99;
+}
+fn main() -> i32 { return f(8); }

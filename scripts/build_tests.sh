@@ -163,6 +163,8 @@ build_test test_telemetry "$UNIT/test_telemetry.cpp"
 build_test test_sound_rewrites "$UNIT/test_sound_rewrites.cpp"
 build_test test_loop_speculative "$UNIT/test_loop_speculative.cpp"
 
+build_test test_for_loops "$UNIT/test_for_loops.cpp"
+
 # Rule 36 regression suite (tests/regression/).
 build_test test_regression "$REGRESSION/test_regression.cpp"
 

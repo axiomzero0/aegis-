@@ -61,10 +61,21 @@ int CopyPropagationPass::run(Graph& g, const PassBudget& budget) {
             // Node::data_ins()). Filter out Region nodes.
             NodeId first_val = kInvalidNodeId;
             bool all_same = true;
-            for (NodeId in : d) {
+            for (size_t idx = 0; idx < d.size(); ++idx) {
+                NodeId in = d[idx];
                 if (in == kInvalidNodeId) continue;
                 if (in >= g.size()) continue;
-                if (g[in].kind == NodeKind::Region || g[in].kind == NodeKind::Loop) continue;
+                // The REGION slot is inputs[0] by the make_phi
+                // convention — a Region, a Loop, or a ctrl Proj (the
+                // loop-exit effect merge lowers as
+                // Phi(exit_proj, {eff_a, eff_b})). It is skipped BY
+                // POSITION, never by node kind: the phi VALUES may
+                // legitimately be Projs themselves (the effect chain
+                // is built from Start's eff Proj), and skipping those
+                // by kind would silently disable the collapse.
+                if (idx == 0) continue;
+                if (g[in].kind == NodeKind::Region ||
+                    g[in].kind == NodeKind::Loop) continue;
                 if (first_val == kInvalidNodeId) {
                     first_val = in;
                 } else if (first_val != in) {

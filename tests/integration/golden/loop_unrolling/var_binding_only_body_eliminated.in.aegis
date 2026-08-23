@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    for i in 0..6 {
+        var t = i;
+    }
+    return 2;
+}

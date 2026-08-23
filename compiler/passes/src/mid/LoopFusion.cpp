@@ -26,6 +26,7 @@
 #include "aegis/ir/NodeKind.hpp"
 #include "aegis/passes/PassConstants.hpp"
 #include "aegis/passes/mid/SCEV.hpp"
+#include "aegis/pgo/Telemetry.hpp"
 
 namespace aegis::passes::mid {
 
@@ -54,6 +55,7 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         SCEVExpr expr_b{};
         for (NodeId user : g.outputs()[a].view()) {
             if (user >= g.size()) continue;
+            if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
             if (g[user].kind != NodeKind::Phi) continue;
             phi_a = user;
             expr_a = scev.scev_of(user);
@@ -61,6 +63,7 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         }
         for (NodeId user : g.outputs()[b].view()) {
             if (user >= g.size()) continue;
+            if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
             if (g[user].kind != NodeKind::Phi) continue;
             phi_b = user;
             expr_b = scev.scev_of(user);
@@ -84,6 +87,9 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         bool phi_b_has_external_uses = false;
         for (NodeId user : g.outputs()[phi_b].view()) {
             if (user >= g.size()) continue;
+            // Dead users are stale output-list entries, not uses
+            // (same defect class fixed in LoopUnrolling; Rule 73).
+            if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
             const Node& u = g[user];
             if (u.kind == NodeKind::Add) {
                 back_add_b = user;
@@ -100,6 +106,51 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         }
         if (phi_b_has_external_uses || back_add_b == kInvalidNodeId) continue;
 
+        // Source-level loops lower with an exit If off the Loop node
+        // (Proj(0)=body ctrl, Proj(1)=exit ctrl). Eliminating loop B
+        // must retire that If too: B's exit users rewire to B's ENTRY
+        // control, and B's body control must have no live users
+        // (any live body node = per-iteration side effects that
+        // elimination would silently drop — Rule 62 class).
+        NodeId exit_if_b    = kInvalidNodeId;
+        NodeId tproj_b      = kInvalidNodeId;
+        NodeId fproj_b      = kInvalidNodeId;
+        for (NodeId user : g.users_snapshot(b)) {
+            if (user >= g.size()) continue;
+            if (g[user].kind != NodeKind::If) continue;
+            if (g[user].ctrl_in() != b) continue;
+            exit_if_b = user;
+            break;
+        }
+        if (exit_if_b != kInvalidNodeId) {
+            for (NodeId user : g.users_snapshot(exit_if_b)) {
+                if (user >= g.size()) continue;
+                const Node& u = g[user];
+                if (u.kind != NodeKind::Proj) continue;
+                if (u.payload.proj_index == 0) tproj_b = user;
+                else if (u.payload.proj_index == 1) fproj_b = user;
+            }
+            bool body_b_has_live_uses = false;
+            if (tproj_b != kInvalidNodeId) {
+                for (NodeId user : g.users_snapshot(tproj_b)) {
+                    if (user == b) continue; // the back edge itself
+                    if (user >= g.size()) continue;
+                    if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
+                    body_b_has_live_uses = true;
+                    break;
+                }
+            }
+            if (body_b_has_live_uses || fproj_b == kInvalidNodeId) {
+                // B's body does real per-iteration work; fusion is not
+                // the pass to eliminate it (and elimination would be
+                // unsound anyway). Telemetry per Rule 65.
+                pgo::TelemetrySink::instance().emit(
+                    pgo::TelemetryEvent::PassBudgetExceeded,
+                    "pass=loop_fusion reason=body_has_live_effect_uses");
+                continue;
+            }
+        }
+
         // SOUND REWRITE: the second loop is degenerate (Phi only feeds
         // loop-structure nodes). Rewire the Phi's uses to point at
         // phi_a + mark the second loop's Loop + Phi + back-edge Add +
@@ -115,6 +166,22 @@ int LoopFusionPass::run(Graph& g, const PassBudget& budget) {
         g[back_add_b].flags.set(NodeFlagBit::IsDead);
         if (exit_cmp_b != kInvalidNodeId) {
             g[exit_cmp_b].flags.set(NodeFlagBit::IsDead);
+        }
+        // Source-level shape: retire B's exit If + Projs, rewiring
+        // B's exit users (post-B code) to B's ENTRY control.
+        if (exit_if_b != kInvalidNodeId) {
+            NodeId entry_ctrl_b = g[b].inputs.size() > 1
+                ? g[b].inputs[1] : kInvalidNodeId;
+            if (entry_ctrl_b != kInvalidNodeId) {
+                for (NodeId user : g.users_snapshot(fproj_b)) {
+                    g.swap_input(user, fproj_b, entry_ctrl_b);
+                }
+            }
+            if (tproj_b != kInvalidNodeId) {
+                g[tproj_b].flags.set(NodeFlagBit::IsDead);
+            }
+            g[fproj_b].flags.set(NodeFlagBit::IsDead);
+            g[exit_if_b].flags.set(NodeFlagBit::IsDead);
         }
         ++fused;
     }

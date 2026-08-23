@@ -1,6 +1,0 @@
-fn f(x: i32) -> i32 {
-    return (x & 12) | (x ^ 3);
-}
-fn main() -> i32 {
-    return f(9);
-}

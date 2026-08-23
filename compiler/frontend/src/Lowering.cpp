@@ -119,6 +119,99 @@ BindingSnapshot snapshot(const SwissTable<SymbolId, NodeId>& m) {
     });
     return s;
 }
+
+// Names assigned inside a loop body to identifiers that are ALREADY
+// bound outside it (the accumulator pattern: `var s = 0; ... s = s + i`).
+// Each such name needs a loop-header Phi so iteration k reads the
+// value produced by iteration k-1, and the post-loop binding reads the
+// final value. Body-local lets die with the iteration and need nothing.
+void collect_loop_accumulators(const ASTNode& n,
+                               const SwissTable<SymbolId, NodeId>& outer,
+                               SmallVector<SymbolId, 4>& out) {
+    auto is_outer = [&](SymbolId s) {
+        return outer.get(s) != nullptr;
+    };
+    auto already = [&](SymbolId s) {
+        for (SymbolId e : out) if (e == s) return true;
+        return false;
+    };
+    // Explicit stack walk (no recursion-depth limits, Rule 73).
+    SmallVector<const ASTNode*, 16> stack;
+    stack.push_back(&n);
+    while (!stack.empty()) {
+        const ASTNode* cur = stack.back();
+        stack.pop_back();
+        if (cur == nullptr) continue;
+        switch (cur->kind) {
+            case ASTKind::AssignExpr: {
+                const auto& a = static_cast<const ASTAssignExpr&>(*cur);
+                if (a.target && a.target->kind == ASTKind::Ident) {
+                    SymbolId name = static_cast<const ASTIdent&>(*a.target).name;
+                    if (is_outer(name) && !already(name)) out.push_back(name);
+                }
+                if (a.value) stack.push_back(a.value.get());
+                break;
+            }
+            case ASTKind::LetStmt: {
+                const auto& s = static_cast<const ASTLetStmt&>(*cur);
+                if (s.init) stack.push_back(s.init.get());
+                break;
+            }
+            case ASTKind::ExprStmt: {
+                const auto& s = static_cast<const ASTExprStmt&>(*cur);
+                if (s.expr) stack.push_back(s.expr.get());
+                break;
+            }
+            case ASTKind::ReturnStmt: {
+                const auto& s = static_cast<const ASTReturnStmt&>(*cur);
+                if (s.value) stack.push_back(s.value.get());
+                break;
+            }
+            case ASTKind::IfStmt: {
+                const auto& s = static_cast<const ASTIfStmt&>(*cur);
+                if (s.cond) stack.push_back(s.cond.get());
+                if (s.then_branch) stack.push_back(s.then_branch.get());
+                if (s.else_branch) stack.push_back(s.else_branch.get());
+                break;
+            }
+            case ASTKind::ForStmt: {
+                const auto& s = static_cast<const ASTForStmt&>(*cur);
+                // Note: an inner loop's accumulators that refer to the
+                // OUTER frame are already collected here (same frame);
+                // inner-loop-local names are not outer names.
+                if (s.body) stack.push_back(s.body.get());
+                break;
+            }
+            case ASTKind::Block: {
+                const auto& b = static_cast<const ASTBlock&>(*cur);
+                for (const auto& s : b.stmts) {
+                    if (s) stack.push_back(s.get());
+                }
+                break;
+            }
+            case ASTKind::BinaryExpr: {
+                const auto& b = static_cast<const ASTBinaryExpr&>(*cur);
+                if (b.lhs) stack.push_back(b.lhs.get());
+                if (b.rhs) stack.push_back(b.rhs.get());
+                break;
+            }
+            case ASTKind::UnaryExpr: {
+                const auto& u = static_cast<const ASTUnaryExpr&>(*cur);
+                if (u.operand) stack.push_back(u.operand.get());
+                break;
+            }
+            case ASTKind::CallExpr: {
+                const auto& c = static_cast<const ASTCallExpr&>(*cur);
+                for (const auto& arg : c.args) {
+                    if (arg) stack.push_back(arg.get());
+                }
+                break;
+            }
+            default:
+                break; // literals/idents carry no nested statements
+        }
+    }
+}
 } // namespace
 
 Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
@@ -234,6 +327,112 @@ Expected<bool> Lowerer::lower_stmt(const ASTNode& n) {
                 if (!s) continue;
                 auto r = lower_stmt(*s);
                 if (!r.has_value()) return std::unexpected(r.error());
+            }
+            return true;
+        }
+        case ASTKind::ForStmt: {
+            const auto& s = static_cast<const ASTForStmt&>(n);
+            // The TypeChecker gates iter to the RangeExpr form; a
+            // different shape here is a frontend bug — fail loudly
+            // (Rule D.3), never guess.
+            if (!s.iter || s.iter->kind != ASTKind::RangeExpr) {
+                return std::unexpected(Error::type_(0, n.span));
+            }
+            const auto& range = static_cast<const ASTRangeExpr&>(*s.iter);
+            auto lo = lower_expr(*range.lo);
+            if (!lo.has_value()) return std::unexpected(lo.error());
+            auto hi = lower_expr(*range.hi);
+            if (!hi.has_value()) return std::unexpected(hi.error());
+
+            // Pre-loop bindings (restored after the loop; accumulators
+            // are remapped to their loop-header phis).
+            BindingSnapshot pre_loop = snapshot(bindings_);
+            NodeId entry = current_ctrl_;
+            NodeId entry_eff = current_eff_;
+
+            // Loop header: inputs [back_pred, entry_pred]; the back
+            // edge is wired after the body lowers.
+            NodeId loop = g_.make_loop(entry, entry);
+
+            // Induction phi: i = Phi(loop, {lo, <back-edge value>}).
+            NodeId phi_i = g_.make_phi(loop, {*lo, kInvalidNodeId},
+                                       kInvalidTypeId);
+
+            // Accumulator phis for outer names assigned in the body
+            // (`var s = 0; for ... { s = s + i; }`): iteration k must
+            // read the value produced by iteration k-1.
+            SmallVector<SymbolId, 4> acc_names;
+            if (s.body) collect_loop_accumulators(*s.body, bindings_, acc_names);
+            struct AccPhi { SymbolId name; NodeId phi; };
+            SmallVector<AccPhi, 4> acc_phis;
+            for (SymbolId name : acc_names) {
+                const NodeId* entry_val_p = bindings_.get(name);
+                NodeId entry_val = (entry_val_p != nullptr)
+                    ? *entry_val_p
+                    : g_.make_constant_i64(0, kInvalidTypeId);
+                NodeId phi_x = g_.make_phi(loop, {entry_val, kInvalidNodeId},
+                                           kInvalidTypeId);
+                acc_phis.push_back({name, phi_x});
+                bindings_.insert(name, phi_x); // body reads see the phi
+            }
+
+            // Loop var binding (body-local scope).
+            bindings_.insert(s.var_name, phi_i);
+
+            // Exit check `i < hi`; true proj = body, false proj = exit.
+            NodeId cmp  = g_.make_cmp(NodeKind::CmpLt, phi_i, *hi);
+            NodeId ifn  = g_.make_if(loop, cmp);
+            NodeId tproj = g_.make_proj(ifn, 0);
+            NodeId fproj = g_.make_proj(ifn, 1);
+
+            // Lower the body on the true projection.
+            current_ctrl_ = tproj;
+            if (s.body) {
+                auto r = lower_stmt(*s.body);
+                if (!r.has_value()) return std::unexpected(r.error());
+            }
+            if (current_ctrl_ == kInvalidNodeId) {
+                // The TypeChecker rejects returns inside loop bodies;
+                // reaching here means an unlowerable statement slipped
+                // through — fail loudly rather than wire a bogus back
+                // edge (Rules D.3/73).
+                return std::unexpected(Error::type_(0, n.span));
+            }
+
+            // Back edges: i_next = i + 1; accumulators carry their
+            // body-end values around.
+            NodeId one = g_.make_constant_i64(1, kInvalidTypeId);
+            NodeId next_i = hc_.lookup_or_insert(
+                NodeKind::Add, {phi_i, one}, kInvalidTypeId, NodePayload{});
+            g_.set_input(phi_i, 2, next_i);
+            for (const auto& ap : acc_phis) {
+                const NodeId* back_val_p = bindings_.get(ap.name);
+                NodeId back_val = (back_val_p != nullptr)
+                    ? *back_val_p
+                    : g_.make_constant_i64(0, kInvalidTypeId);
+                g_.set_input(ap.phi, 2, back_val);
+            }
+            g_.set_input(loop, 0, current_ctrl_);
+
+            // Effect merge at the exit: the loop may run zero times
+            // (runtime bounds with lo >= hi), so post-loop effects
+            // must join the pre-loop chain with the body chain via a
+            // phi rather than chain off the body unconditionally.
+            NodeId eff_phi = g_.make_phi(fproj, {entry_eff, current_eff_},
+                                         kInvalidTypeId);
+            current_eff_ = eff_phi;
+            current_ctrl_ = fproj;
+
+            // Scoping: restore pre-loop bindings (drops the loop var
+            // and body-local lets), then rebind accumulators to their
+            // header phis — the phi holds the value that would enter
+            // the next iteration, i.e. the final accumulated value.
+            bindings_.clear();
+            for (const auto& [sym, node] : pre_loop.entries) {
+                bindings_.insert(sym, node);
+            }
+            for (const auto& ap : acc_phis) {
+                bindings_.insert(ap.name, ap.phi);
             }
             return true;
         }

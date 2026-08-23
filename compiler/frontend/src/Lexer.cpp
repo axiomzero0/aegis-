@@ -270,7 +270,10 @@ bool Lexer::tokenize(std::vector<Token>& out) {
                 if (peek(1) == ':') { advance(2); k = TokenKind::DoubleColon; }
                 else { advance(); k = TokenKind::Colon; }
                 break;
-            case '.': advance(); k = TokenKind::Dot; break;
+            case '.':
+                if (peek(1) == '.') { advance(2); k = TokenKind::DotDot; }
+                else { advance(); k = TokenKind::Dot; }
+                break;
             case '@': advance(); k = TokenKind::At; break;
             case '?': advance(); k = TokenKind::Question; break;
             default:

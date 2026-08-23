@@ -69,6 +69,12 @@ constexpr int kBranchLevels = 7;
 /// Functions in the multi-function module case.
 constexpr int kMultiFnCount = 64;
 
+/// Loops in the loop-heavy case. 64 loops (a mix of degenerate
+/// constant-trip loops that fully collapse, runtime-bound loops that
+/// must survive, and accumulator loops) exercise the whole loop
+/// stack: SCEV, LoopFusion, LoopUnrolling, and the verifier.
+constexpr int kLoopHeavyCount = 64;
+
 /// Timing repetitions per case; the MEDIAN is reported to suppress
 /// scheduler noise on shared machines.
 constexpr int kTimingRepetitions = 5;
@@ -157,6 +163,47 @@ constexpr int kTimingRepetitions = 5;
         stack.push_back({tproj, f.level + 1});
         stack.push_back({fproj, f.level + 1});
     }
+    return g;
+}
+
+[[nodiscard]] Graph build_loop_heavy_graph(SymbolTable& syms) {
+    // A module of kLoopHeavyCount/3 loop functions of each flavor,
+    // plus one caller. Measures the loop-aware pipeline end to end
+    // (frontend + SCEV + fusion + unrolling + verification).
+    std::string src;
+    src.reserve(static_cast<size_t>(kLoopHeavyCount) * 48);
+    int flavor = 0;
+    for (int i = 0; i < kLoopHeavyCount; ++i) {
+        src += "fn lf";
+        src += std::to_string(i);
+        src += "(n: i32) -> i32 {\n";
+        switch (flavor % 3) {
+            case 0: // degenerate constant trip -> fully eliminated
+                src += "    for i in 0..8 {\n    }\n    return 1;\n";
+                break;
+            case 1: // runtime bound -> loop kept, verifier-checked
+                src += "    for i in 0..n {\n    }\n    return 2;\n";
+                break;
+            default: // accumulator -> phis + back edges
+                src += "    var s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n";
+        }
+        src += "}\n";
+        ++flavor;
+    }
+    src += "fn main() -> i32 {\n    return lf0(4) + lf1(4);\n}\n";
+
+    DiagnosticSink sink(stderr);
+    Lexer lex(src, syms.intern("<loopbench>"), &syms);
+    std::vector<Token> toks;
+    if (!lex.tokenize(toks)) return Graph(&syms);
+    Parser parser(std::move(toks), &syms, &sink);
+    auto mod = parser.parse_module();
+    if (!mod.has_value()) return Graph(&syms);
+    TypeChecker tc(&syms, &sink);
+    if (!tc.check_module(*mod.value()).has_value()) return Graph(&syms);
+    Graph g(&syms);
+    Lowerer lowerer(g, &syms);
+    if (!lowerer.lower_module(*mod.value()).has_value()) return Graph(&syms);
     return g;
 }
 
@@ -252,6 +299,31 @@ int main() {
     results.push_back(run_bench("branchy", syms, [](SymbolTable& s) {
         return build_branch_graph(s);
     }));
+    {
+        SymbolTable loop_syms;
+        Graph g = build_loop_heavy_graph(loop_syms);
+        if (g.size() <= 1) {
+            std::cerr << "bench: loop_heavy module failed to lower\n";
+            return 1;
+        }
+        std::vector<double> samples_us;
+        for (int rep = 0; rep < kTimingRepetitions; ++rep) {
+            SymbolTable s;
+            auto t0 = Clock::now();
+            Graph g2 = build_loop_heavy_graph(s);
+            PassManager pm(g2);
+            for (auto& p : passes::mid::build_standard_pipeline()) pm.add(std::move(p));
+            pm.run(CompileMode::AOT);
+            auto t1 = Clock::now();
+            std::string why;
+            if (!g2.verify(why)) return 1;
+            samples_us.push_back(
+                std::chrono::duration<double, std::micro>(t1 - t0).count());
+        }
+        std::sort(samples_us.begin(), samples_us.end());
+        results.push_back(
+            BenchResult{"loop_heavy", g.size(), samples_us[samples_us.size() / 2], true});
+    }
     {
         SymbolTable bench_syms;
         size_t fns = 0;

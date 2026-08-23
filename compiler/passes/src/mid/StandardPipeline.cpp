@@ -14,8 +14,12 @@
 //   9. SCEV              - analyze loop induction variables (analysis pass).
 //  10. LICM              - hoist loop-invariant Pure nodes.
 //  11. InductionVarSimp  - rewrite induction vars to linear form.
-//  12. LoopUnrolling     - duplicate loop bodies (budget-guarded).
-//  13. LoopFusion        - merge adjacent loops with same range.
+//  12. LoopFusion        - eliminate degenerate SCEV-paired loops.
+//                          Runs BEFORE unrolling: fusion may empty an
+//                          outer loop's body (nested-loop case), which
+//                          then lets unrolling eliminate the outer in
+//                          the same pipeline sweep.
+//  13. LoopUnrolling     - full-unroll constant-trip loops (budget-guarded).
 //  14. LoopFission       - split large loops for I-cache density.
 //  15. BoundsCheckElim   - remove statically-provable bounds checks.
 //  16. DSE               - eliminate dead stores (overwritten before read).
@@ -64,8 +68,8 @@ std::vector<std::unique_ptr<Pass>> build_standard_pipeline() {
     v.push_back(std::make_unique<SCEVPass>());               // analysis
     v.push_back(std::make_unique<LICMPass>());
     v.push_back(std::make_unique<InductionVarSimplificationPass>());
-    v.push_back(std::make_unique<LoopUnrollingPass>());
     v.push_back(std::make_unique<LoopFusionPass>());
+    v.push_back(std::make_unique<LoopUnrollingPass>());
     v.push_back(std::make_unique<LoopFissionPass>());
     v.push_back(std::make_unique<BoundsCheckElimPass>());
     v.push_back(std::make_unique<DeadStoreElimPass>());

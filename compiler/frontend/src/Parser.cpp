@@ -264,13 +264,23 @@ Expected<ASTPtr> Parser::parse_for_stmt() {
     expect(TokenKind::ForKw, "for");
     const Token& var = expect(TokenKind::Ident, "for variable");
     expect(TokenKind::InKw, "in");
-    auto iter = parse_expr();
-    if (!iter.has_value()) return std::unexpected(iter.error());
+    // The supported iteration space is `lo..hi` (integral, step 1).
+    // Parse the lower bound, require the range operator, parse the
+    // upper bound — anything else is a loud parse error, never a
+    // silently-misinterpreted expression (Rule D.3).
+    auto lo = parse_expr();
+    if (!lo.has_value()) return std::unexpected(lo.error());
+    expect(TokenKind::DotDot, "lo..hi range");
+    auto hi = parse_expr();
+    if (!hi.has_value()) return std::unexpected(hi.error());
+    auto range = std::make_unique<ASTRangeExpr>();
+    range->lo = std::move(*lo);
+    range->hi = std::move(*hi);
     auto body = parse_block();
     if (!body.has_value()) return std::unexpected(body.error());
     auto s = std::make_unique<ASTForStmt>();
     s->var_name = syms_->intern(var.text);
-    s->iter = std::move(*iter);
+    s->iter = std::move(range);
     s->body = std::move(*body);
     return s;
 }

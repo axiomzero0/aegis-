@@ -181,10 +181,42 @@ private:
                 check_assign(static_cast<const ASTAssignExpr&>(n), frame);
                 return;
             }
-            case ASTKind::ForStmt:
+            case ASTKind::ForStmt: {
+                const auto& s = static_cast<const ASTForStmt&>(n);
+                // Only the `for var in lo..hi {}` iteration space is
+                // lowerable; any other iterator shape is a loud error
+                // (Rule D.3 — never a silently-misinterpreted expr).
+                if (!s.iter || s.iter->kind != ASTKind::RangeExpr) {
+                    report(kErrNotLowered, n.span, 0);
+                    return;
+                }
+                const auto& range = static_cast<const ASTRangeExpr&>(*s.iter);
+                check_expr(*range.lo, frame);
+                check_expr(*range.hi, frame);
+                // The body is checked in a CHILD frame: the loop var
+                // and any body-local bindings die at the loop end.
+                // Outer-frame names stay visible (reads are
+                // loop-invariant; assignments lower to loop-header
+                // phis in the Lowerer).
+                Frame body_frame = frame;
+                if (!body_frame.try_bind(s.var_name, /*is_mutable=*/false)) {
+                    report(kErrDuplicateBinding, n.span, s.var_name);
+                }
+                if (s.body) {
+                    if (body_contains_unlowerable(*s.body)) {
+                        // return/match inside the body would break the
+                        // back-edge wiring (still-unlowered shapes);
+                        // reject loudly rather than mis-lower.
+                        report(kErrNotLowered, s.body->span, 0);
+                        return;
+                    }
+                    check_stmt(*s.body, body_frame);
+                }
+                return;
+            }
             case ASTKind::MatchStmt:
-                // Rule D.3: the Lowerer silently lowers these to a
-                // constant — accepting them would compute a wrong
+                // Rule D.3: the Lowerer silently lowers match to a
+                // constant — accepting it would compute a wrong
                 // answer with no diagnostic. Fail loudly instead.
                 report(kErrNotLowered, n.span, 0);
                 return;
@@ -207,6 +239,38 @@ private:
             if (else_frame.find(b.name) != nullptr) {       // bound in both
                 out.bindings.push_back(b);
             }
+        }
+    }
+
+    // True when the statement tree contains a construct that cannot
+    // yet be lowered INSIDE a loop body (return breaks the back-edge
+    // wiring; match lowers to a constant). Used by the ForStmt check
+    // so those shapes are rejected loudly (Rule D.3), never silently
+    // mis-lowered.
+    static bool body_contains_unlowerable(const ASTNode& n) {
+        switch (n.kind) {
+            case ASTKind::ReturnStmt:
+            case ASTKind::MatchStmt:
+                return true;
+            case ASTKind::Block: {
+                const auto& b = static_cast<const ASTBlock&>(n);
+                for (const auto& s : b.stmts) {
+                    if (s && body_contains_unlowerable(*s)) return true;
+                }
+                return false;
+            }
+            case ASTKind::IfStmt: {
+                const auto& s = static_cast<const ASTIfStmt&>(n);
+                if (s.then_branch && body_contains_unlowerable(*s.then_branch)) return true;
+                if (s.else_branch && body_contains_unlowerable(*s.else_branch)) return true;
+                return false;
+            }
+            case ASTKind::ForStmt: {
+                const auto& s = static_cast<const ASTForStmt&>(n);
+                return s.body && body_contains_unlowerable(*s.body);
+            }
+            default:
+                return false;
         }
     }
 
@@ -289,6 +353,16 @@ private:
                 for (const auto& s : b.stmts) {
                     if (s) check_stmt(*s, frame);
                 }
+                return;
+            }
+            case ASTKind::RangeExpr: {
+                // `lo..hi` — check both bounds. (Today only the
+                // for-statement parser produces this node, but if it
+                // ever appears elsewhere the bounds must still be
+                // checked — never silently skipped. Rule D.3.)
+                const auto& r = static_cast<const ASTRangeExpr&>(n);
+                if (r.lo) check_expr(*r.lo, frame);
+                if (r.hi) check_expr(*r.hi, frame);
                 return;
             }
             case ASTKind::FieldExpr:

@@ -9,6 +9,10 @@ add_executable(aegis_unit_tests
     unit/test_passes.cpp
     unit/test_frontend_smoke.cpp
 )
+add_executable(aegis_for_loop_tests unit/test_for_loops.cpp)
+target_link_libraries(aegis_for_loop_tests PRIVATE aegis_core aegis_pgo
+                                                   aegis_compile_options)
+add_test(NAME aegis_for_loop_tests COMMAND aegis_for_loop_tests)
 target_link_libraries(aegis_unit_tests PRIVATE aegis_core aegis_compile_options)
 add_test(NAME aegis_unit_tests COMMAND aegis_unit_tests)
 

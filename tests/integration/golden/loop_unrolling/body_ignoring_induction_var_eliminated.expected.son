@@ -1,0 +1,25 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Constant (Pure) value=0 ins=[] DEAD
+n4 : Constant (Pure) value=4 ins=[] DEAD
+n5 : Loop (Pure) ins=[9,1] DEAD
+n6 : Phi (Pure) ins=[5,3,15] DEAD
+n7 : CmpLt (Pure) ins=[22,4] DEAD
+n8 : If (Pure) ins=[5,7] DEAD
+n9 : Proj (Pure) proj=0 ins=[8] DEAD
+n10 : Proj (Pure) proj=1 ins=[8] DEAD
+n11 : Constant (Pure) value=5 ins=[] DEAD
+n12 : Constant (Pure) value=5 ins=[] DEAD
+n13 : Add (Pure) ins=[11,12] DEAD
+n14 : Constant (Pure) value=1 ins=[] DEAD
+n15 : Add (Pure) ins=[22,14] DEAD
+n16 : Phi (Pure) ins=[1,2,2] DEAD
+n17 : Constant (Pure) value=3 ins=[]
+n18 : Return (Pure) ins=[1,2,17]
+n19 : Proj (Pure) proj=1 ins=[0] DEAD
+n20 : Constant (Pure) value=10 ins=[] DEAD
+n21 : Proj (Pure) proj=1 ins=[0] DEAD
+n22 : Constant (Pure) value=0 ins=[] DEAD
+n23 : Proj (Pure) proj=1 ins=[0] DEAD

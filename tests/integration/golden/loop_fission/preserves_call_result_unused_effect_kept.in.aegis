@@ -1,7 +1,0 @@
-fn g(v: i32) -> i32 {
-    return v + 1;
-}
-fn main() -> i32 {
-    g(5);
-    return 1;
-}

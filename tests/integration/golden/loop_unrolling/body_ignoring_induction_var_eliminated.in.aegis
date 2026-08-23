@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    for i in 0..4 {
+        let dead = 5 + 5;
+    }
+    return 3;
+}

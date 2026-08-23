@@ -46,23 +46,37 @@ namespace aegis::passes::mid {
 namespace {
 // Collect the set of NodeIds whose ctrl_in traces back to the given
 // Loop node. This is the loop body.
+//
+// Performance (Rule 41): the ctrl region inside a loop is CYCLIC, so
+// the previous guard-counted walk spun to its full 10k depth for
+// every node outside the cycle — O(nodes x 10000) per invocation and
+// a 1000x-per-node slowdown on loop-heavy modules (caught by the
+// loop_heavy benchmark the day loops became source-expressible). A
+// per-walk visited set terminates each walk at first revisit instead:
+// if a node is revisited, walking further cannot discover loop_id.
 std::vector<NodeId> collect_loop_body(Graph& g, NodeId loop_id) {
     std::vector<NodeId> body;
+    // Stamp-generation visited set: walk W marks slots with W, so no
+    // per-walk clearing is needed (Rule 56 spirit — set ops without
+    // reallocation; the vector is allocated once per pass invocation).
+    std::vector<uint32_t> visited(g.size(), 0);
+    uint32_t walk_stamp = 0;
     for (NodeId id = 0; id < g.size(); ++id) {
         const Node& n = g[id];
         if (n.flags.has(NodeFlagBit::IsDead)) continue;
         if (id == loop_id) continue;
         // Walk ctrl_in chain to see if it reaches the loop.
+        ++walk_stamp;
         NodeId cur = n.ctrl_in();
-        uint32_t guard = 0;
         while (cur != kInvalidNodeId && cur < g.size()) {
             if (cur == loop_id) {
                 body.push_back(id);
                 break;
             }
             if (g[cur].kind == NodeKind::Start) break;
+            if (visited[cur] == walk_stamp) break; // cycle: stop
+            visited[cur] = walk_stamp;
             cur = g[cur].ctrl_in();
-            if (++guard > constants::kEscapeMaxBfsDepth) break;
         }
     }
     return body;
@@ -117,9 +131,39 @@ int LoopUnrollingPass::run(Graph& g, const PassBudget& budget) {
             continue;
         }
 
-        // Collect the loop body.
-        auto body = collect_loop_body(g, id);
-        if (body.empty()) continue;
+        // Source-level loops lower with an exit If hanging off the
+        // Loop node: If(ctrl=loop, cond=exit_cmp) with Proj(0)=body
+        // ctrl and Proj(1)=exit ctrl. That If is loop STRUCTURE, not
+        // loop BODY — detect it up front so the body walk and the
+        // inner-control-flow check below exclude it.
+        NodeId exit_if   = kInvalidNodeId;
+        NodeId true_proj = kInvalidNodeId;
+        NodeId false_proj = kInvalidNodeId;
+        for (NodeId user : g.users_snapshot(id)) {
+            if (user >= g.size()) continue;
+            if (g[user].kind != NodeKind::If) continue;
+            if (g[user].ctrl_in() != id) continue;
+            exit_if = user;
+            break;
+        }
+        if (exit_if != kInvalidNodeId) {
+            for (NodeId user : g.users_snapshot(exit_if)) {
+                if (user >= g.size()) continue;
+                const Node& u = g[user];
+                if (u.kind != NodeKind::Proj) continue;
+                if (u.payload.proj_index == 0) true_proj = user;
+                else if (u.payload.proj_index == 1) false_proj = user;
+            }
+        }
+
+        // Collect the loop body (excluding the exit If itself).
+        auto body_raw = collect_loop_body(g, id);
+        std::vector<NodeId> body;
+        for (NodeId b : body_raw) {
+            if (b == exit_if) continue;
+            body.push_back(b);
+        }
+        if (body.empty() && exit_if == kInvalidNodeId) continue;
 
         // Budget check: factor * body_size.
         uint32_t growth = factor * static_cast<uint32_t>(body.size());
@@ -198,6 +242,12 @@ int LoopUnrollingPass::run(Graph& g, const PassBudget& budget) {
         for (NodeId user : g.outputs()[phi_id].view()) {
             if (user == back_add) continue; // back-edge Add is OK
             if (user >= g.size()) continue;
+            // Stale entries: a user killed by an earlier pass (e.g.
+            // the inner loop of a nest eliminated by LoopFusion) keeps
+            // its output-list slot until the sweep — dead users are
+            // not real uses (Rule 73; this was silently blocking
+            // elimination of the outer loop).
+            if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
             const Node& u = g[user];
             if (u.kind == NodeKind::CmpLt ||
                 u.kind == NodeKind::CmpLe ||
@@ -214,6 +264,32 @@ int LoopUnrollingPass::run(Graph& g, const PassBudget& budget) {
                 pgo::TelemetryEvent::PassBudgetExceeded,
                 "pass=loop_unrolling reason=phi_has_external_uses");
             continue;
+        }
+
+        // (Exit-If detection + Proj discovery happen BEFORE the body
+        // collection above — see the restructured block.)
+        if (exit_if != kInvalidNodeId) {
+            // SOUND GATE: the body control (Proj 0) must have no live
+            // users besides the Loop's back edge. A live user means
+            // real per-iteration code (a call, an effect node, an
+            // accumulator phi's value chain) — eliminating the loop
+            // would silently drop its side effects (Rule 62 class).
+            bool body_has_live_uses = false;
+            if (true_proj != kInvalidNodeId) {
+                for (NodeId user : g.users_snapshot(true_proj)) {
+                    if (user == id) continue; // the back edge itself
+                    if (user >= g.size()) continue;
+                    if (g[user].flags.has(NodeFlagBit::IsDead)) continue;
+                    body_has_live_uses = true;
+                    break;
+                }
+            }
+            if (body_has_live_uses || false_proj == kInvalidNodeId) {
+                pgo::TelemetrySink::instance().emit(
+                    pgo::TelemetryEvent::PassBudgetExceeded,
+                    "pass=loop_unrolling reason=body_has_live_effect_uses");
+                continue;
+            }
         }
 
         // SOUND REWRITE: the loop is degenerate (Phi only feeds the
@@ -238,6 +314,23 @@ int LoopUnrollingPass::run(Graph& g, const PassBudget& budget) {
         g[back_add].flags.set(NodeFlagBit::IsDead);
         if (exit_cmp != kInvalidNodeId) {
             g[exit_cmp].flags.set(NodeFlagBit::IsDead);
+        }
+        // Source-level shape: also retire the exit If + both Projs.
+        // Post-loop code was rewired to the entry control above, so
+        // nothing live references the Projs anymore.
+        if (exit_if != kInvalidNodeId) {
+            NodeId entry_ctrl = g[id].inputs.size() > 1
+                ? g[id].inputs[1] : kInvalidNodeId;
+            if (entry_ctrl != kInvalidNodeId) {
+                for (NodeId user : g.users_snapshot(false_proj)) {
+                    g.swap_input(user, false_proj, entry_ctrl);
+                }
+            }
+            if (true_proj != kInvalidNodeId) {
+                g[true_proj].flags.set(NodeFlagBit::IsDead);
+            }
+            g[false_proj].flags.set(NodeFlagBit::IsDead);
+            g[exit_if].flags.set(NodeFlagBit::IsDead);
         }
         ++unrolled;
     }

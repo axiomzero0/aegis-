@@ -1,0 +1,10 @@
+fn f(n: i32) -> i32 {
+    var a = 0;
+    var b = 0;
+    for i in 0..n {
+        a = a + i;
+        b = b + 2;
+    }
+    return a + b;
+}
+fn main() -> i32 { return f(4); }

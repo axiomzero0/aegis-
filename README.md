@@ -15,11 +15,14 @@ green:
   (PMR-arena-backed, NodeId-based edges), `HashConsing` (native GVN),
   `Verifier` (Rule 42), `Printer`, `Effects` (Pure/Altered/Crowded
   typing + alias analysis interface), `Types` (affine type table).
-- **`compiler/frontend/`** — Lexer, Pratt Parser producing AST,
-  `EffectInference` (Pure/Altered/Crowded per §3 of the spec),
-  `TypeChecker` (name resolution, immutability, arity + loud
-  rejection of not-yet-lowered constructs), `Lowering` (AST → E-SoN IR
-  via HashCons for native GVN).
+- **`compiler/frontend/`** — Lexer, Pratt Parser producing AST
+  (including `for var in lo..hi {}` range loops), `EffectInference`
+  (Pure/Altered/Crowded per §3 of the spec), `TypeChecker` (name
+  resolution, immutability, arity, loop-scoping rules + loud rejection
+  of not-yet-lowered constructs), `Lowering` (AST → E-SoN IR via
+  HashCons; loops lower to Loop/Phi/If subgraphs with loop-header
+  accumulator phis and exit effect-merges, making the loop passes
+  reachable from real source code).
 - **`compiler/passes/`** — `PassManager` (Rule 42 verification + idempotency
   fixpoint + monotonic budget enforcement), the 19-pass standard
   mid-level pipeline (`mid/`), and the 12 research passes
@@ -50,9 +53,13 @@ green:
 - **`tests/`** — `unit/` (per-pass unit tests), `integration/golden/`
   (Rule 37 golden IR tests: **31 passes × ≥10 pairs each**, every pair
   run in BOTH Static (AOT) and Profile (JIT) modes),
-  `regression/` (Rule 36 suite: 35 tests across 7 fixed bugs, each
-  with the five mandatory categories), `perf/` (Rule 41 compile-time
-  benchmarks), `integration/run_differential.py` (Rule 38
+  `regression/` (Rule 36 suite: 40 tests across 8 fixed bugs, each
+  with the five mandatory categories), `unit/test_for_loops.cpp`
+  (source-level loop feature: 18 tests across lex/parse/check/lower/
+  optimize), `perf/` (Rule 41 compile-time benchmarks incl. the
+  loop_heavy case, gated by `scripts/check_perf.py` against
+  `scripts/perf_baseline.json`), `integration/run_differential.py`
+  (Rule 38
   reference-interpreter ↔ AOT ↔ JIT differential testing over a
   seeded, reproducible corpus).
 - **`docs/`** — `laws.md` (the full Laws & Rules 36-76), `ir_spec.md`
@@ -85,10 +92,12 @@ bash scripts/build_tests.sh  # builds unit + regression + perf tests
 for t in test_core_containers test_ir_graph test_passes \
          test_frontend_smoke test_new_passes test_telemetry \
          test_sound_rewrites test_loop_speculative; do ./build/$t; done
+for t in test_for_loops; do ./build/$t; done
 ./build/test_regression            # Rule 36 suite
 bash tests/integration/run_all_golden.sh   # Rule 37 suite (AOT+JIT)
 python3 tests/integration/run_differential.py  # Rule 38
 ./build/bench_pipeline             # Rule 41 benchmarks
+python3 scripts/check_perf.py      # Rule 41 regression gate
 python3 scripts/scan_magic_numbers.py  # Rule 61/D.1
 python3 scripts/scan_slop.py           # Rule D.7
 ```
@@ -114,11 +123,12 @@ was intended — Rule 52), and commit it together with the pass change.
 
 | Rule | Where |
 |------|-------|
-| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (35 tests, 7 bugs) |
+| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (40 tests, 8 bugs) |
 | Rule 37 (golden tests per pass) | `tests/integration/golden/` (31 passes × ≥10, both modes) |
 | Rule 38 (differential testing in CI) | `tests/integration/run_differential.py` + CI |
 | Rule 39 (weekly deopt-path testing) | CI `schedule:` job (extended corpus) |
 | Rule 40 (replay artifacts on failure) | CI artifact upload + `replay-artifacts/` |
+| Rule 41 (perf regressions need waivers) | `scripts/check_perf.py` + `scripts/perf_baseline.json` + CI |
 | Rule 42 (verifier after every pass) | `passes/PassManager::maybe_verify()` |
 | Rule 50 (versioned caches) | `ProfileData::ProfileHeader`, `Graph::version_` |
 | Rule 51 (bitmasked flags) | `support/Flags.hpp`, `NodeFlagBit`, `EffectTag`, `TypeFlag` |

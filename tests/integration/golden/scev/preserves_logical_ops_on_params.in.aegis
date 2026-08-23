@@ -1,6 +1,0 @@
-fn f(x: i32) -> i32 {
-    return (x > 0 && x < 9) + (x < 0 || x > 9);
-}
-fn main() -> i32 {
-    return f(12);
-}

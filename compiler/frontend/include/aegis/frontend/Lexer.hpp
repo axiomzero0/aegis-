@@ -60,7 +60,7 @@ enum class TokenKind : uint8_t {
     Eq, PlusEq, MinusEq, StarEq, SlashEq,
     Arrow, FatArrow,           // -> =>
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Comma, Semicolon, Colon, DoubleColon, Dot, At,
+    Comma, Semicolon, Colon, DoubleColon, Dot, DotDot, At,
     Question,                  // ? error-propagation
 
     // ---- Reference operators ----

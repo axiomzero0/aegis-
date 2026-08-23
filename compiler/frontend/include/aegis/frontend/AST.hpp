@@ -51,6 +51,7 @@ enum class ASTKind : uint8_t {
     TuplePat,
     IdentPat,
     ForStmt,
+    RangeExpr,
     PathPat,
     PathExpr,
     MemberPat,
@@ -146,7 +147,7 @@ struct ASTIfStmt : ASTStmt {
 };
 
 struct ASTForStmt : ASTStmt {
-    ASTPtr iter;
+    ASTPtr iter;         // ASTRangeExpr for the supported `lo..hi` form
     SymbolId var_name;
     ASTPtr   body; // ASTBlock
     ASTForStmt() : ASTStmt(ASTKind::ForStmt) {}
@@ -233,6 +234,15 @@ struct ASTBoolLit : ASTExpr {
 struct ASTPathExpr : ASTExpr {
     std::vector<SymbolId> segments; // e.g. ["std","io","write_stderr"]
     ASTPathExpr() : ASTExpr(ASTKind::PathExpr) {}
+};
+
+// Inclusive-lower / exclusive-upper integer range: `lo..hi`
+// (iteration space [lo, hi), step 1). Currently produced by the
+// `for var in lo..hi { ... }` statement parser.
+struct ASTRangeExpr : ASTExpr {
+    ASTPtr lo;
+    ASTPtr hi;
+    ASTRangeExpr() : ASTExpr(ASTKind::RangeExpr) {}
 };
 
 // ---- Patterns ----

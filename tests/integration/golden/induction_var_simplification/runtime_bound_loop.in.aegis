@@ -1,0 +1,6 @@
+fn f(n: i32) -> i32 {
+    for i in 0..n {
+    }
+    return 7;
+}
+fn main() -> i32 { return f(5); }

@@ -1,0 +1,37 @@
+graph v=* n=*
+n0 : Start (Pure) ins=[]
+n1 : Proj (Pure) proj=0 ins=[0]
+n2 : Proj (Pure) proj=1 ins=[0]
+n3 : Parameter (Pure) sym=3 ins=[]
+n4 : Constant (Pure) value=0 ins=[]
+n5 : Loop (Pure) ins=[9,1]
+n6 : Phi (Pure) ins=[5,4,12]
+n7 : CmpLt (Pure) ins=[6,3]
+n8 : If (Pure) ins=[5,7]
+n9 : Proj (Pure) proj=0 ins=[8]
+n10 : Proj (Pure) proj=1 ins=[8]
+n11 : Constant (Pure) value=1 ins=[]
+n12 : Add (Pure) ins=[6,11]
+n13 : Phi (Pure) ins=[10,2,2] DEAD
+n14 : Constant (Pure) value=0 ins=[] DEAD
+n15 : Loop (Pure) ins=[19,10]
+n16 : Phi (Pure) ins=[15,4,22]
+n17 : CmpLt (Pure) ins=[16,3]
+n18 : If (Pure) ins=[15,17]
+n19 : Proj (Pure) proj=0 ins=[18]
+n20 : Proj (Pure) proj=1 ins=[18]
+n21 : Constant (Pure) value=1 ins=[] DEAD
+n22 : Add (Pure) ins=[16,11]
+n23 : Phi (Pure) ins=[20,2,2] DEAD
+n24 : Constant (Pure) value=7 ins=[]
+n25 : Return (Pure) ins=[20,2,24]
+n26 : Proj (Pure) proj=0 ins=[0] DEAD
+n27 : Proj (Pure) proj=1 ins=[0] DEAD
+n28 : Constant (Pure) value=3 ins=[]
+n29 : CallAltered (Altered) callee=sym2 ins=[1,2,28]
+n30 : Proj (Pure) proj=0 ins=[29] DEAD
+n31 : Return (Pure) ins=[1,29,28]
+n32 : Proj (Pure) proj=1 ins=[0] DEAD
+n33 : Constant (Pure) value=3 ins=[] DEAD
+n34 : Proj (Pure) proj=1 ins=[0] DEAD
+n35 : Proj (Pure) proj=1 ins=[0] DEAD
