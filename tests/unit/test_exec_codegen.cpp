@@ -18,6 +18,18 @@
 //       topological (post-order DFS) scheduler in instruction
 //       selection.
 //
+//   E5  LOOP EMISSION: structured lowering executes source loops
+//       (preheader phi-init, jz exit check, back-edge register
+//       updates, jmp). Four defects fixed on the way: (a) the loop
+//       emitter assigned FRESH vregs, disconnecting the body from
+//       its phis; (b) param instructions were pulled INSIDE loops,
+//       re-reading ABI registers that homes may clobber; (c) linear
+//       scan computed straight-line intervals — a vreg defined
+//       before a loop and used inside it must live to the back edge
+//       (its register was reused for a body temporary and the loop
+//       then spun on garbage); (d) the harness guard's def-chain
+//       walk cycles on loop phis (two defs) without a visited set.
+//
 //   E4  BRANCH/SELECT EMISSION: merge phis lower to branchless
 //       `select` (mov/test/cmovne). Two defects were fixed on the
 //       way: (a) nested merges need the DIVERGENCE-point If — the
@@ -118,11 +130,16 @@ using Fn4 = int64_t (*)(int64_t, int64_t, int64_t, int64_t);
         for (const auto& mi : mf.instrs) {
             if (mi.op != "ret") continue;
             std::vector<VRegId> work;
+            // Loop phis have TWO defs (init + back-edge update): the
+            // def-chain walk cycles without a visited set.
+            std::vector<uint8_t> visited(max_v + 1, 0);
             if (mi.uses[0] != kInvalidVReg) work.push_back(mi.uses[0]);
             while (!work.empty()) {
                 const VRegId v = work.back();
                 work.pop_back();
                 if (v == kInvalidVReg || v > max_v) continue;
+                if (visited[v] != 0) continue;
+                visited[v] = 1;
                 if (def_at[v] == -1) return nullptr; // undefined read
                 for (VRegId u :
                      mf.instrs[static_cast<size_t>(def_at[v])].uses) {
@@ -489,6 +506,129 @@ int e4_deopt_select_value_exact_at_every_path() {
     return 0;
 }
 
+// ---- E5: loop emission (executed correctness) ----
+
+int e5_minimal_accumulator_loop_executes() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = s + i; }\n"
+        "    return s;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(p);
+    assert(f(0) == 0);   // zero-trip
+    assert(f(1) == 0);
+    assert(f(5) == 10);
+    assert(f(100) == 4950);
+    return 0;
+}
+
+int e5_variant_ivs_and_branch_bodies() {
+    jit::MemManager mem;
+    std::string err;
+    // IVS rewrites i*3 into a derived induction variable: the loop
+    // runs with THREE phis — exercises the machinery end to end.
+    void* p1 = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = s + i * 3; }\n"
+        "    return s;\n"
+        "}",
+        mem, err);
+    assert(p1 != nullptr);
+    auto f1 = reinterpret_cast<Fn1>(p1);
+    assert(f1(5) == 30);
+    assert(f1(0) == 0);
+    // A branch inside the body lowers to a select whose condition
+    // must be emitted inside the loop.
+    void* p2 = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n {\n"
+        "        if i > 2 { s = s + i; } else { s = s + 2; }\n"
+        "    }\n"
+        "    return s;\n"
+        "}",
+        mem, err);
+    assert(p2 != nullptr);
+    auto f2 = reinterpret_cast<Fn1>(p2);
+    // n=0: 0; n=5: (0+2)+(1+2)+(2+2)+3+4 = 13.
+    assert(f2(0) == 0);
+    assert(f2(5) == 13);
+    return 0;
+}
+
+int e5_boundary_zero_trip_and_negative_bounds() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 100;\n"
+        "    for i in 0..n { s = s + i; }\n"
+        "    return s;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(p);
+    // Zero-trip and negative bounds: the exit check fires FIRST; the
+    // accumulator must keep its entry value.
+    assert(f(0) == 100);
+    assert(f(-3) == 100);
+    assert(f(1) == 100);
+    return 0;
+}
+
+int e5_integration_two_sequential_loops() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = s + i; }\n"
+        "    var t = s * 2;\n"
+        "    for j in 0..n { t = t + j; }\n"
+        "    return t;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(p);
+    // n=4: s=6, t=12, +6 => 18.
+    assert(f(4) == 18);
+    assert(f(0) == 0);
+    assert(f(10) == 2 * 45 + 45);
+    return 0;
+}
+
+int e5_deopt_loop_values_exact_and_repeatable() {
+    // Exactness across a grid (the value the loop carries out must
+    // match the reference semantics everywhere, including where the
+    // accumulator crosses zero) + repeatability (no state leaks
+    // between calls through callee-saved homes).
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(n: i32) -> i32 {\n"
+        "    var s = 0;\n"
+        "    for i in 0..n { s = s * 2 - i; }\n"
+        "    return s;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(p);
+    for (int64_t n = 0; n <= 24; ++n) {
+        int64_t ref = 0;
+        for (int64_t i = 0; i < n; ++i) ref = ref * 2 - i;
+        assert(f(n) == ref);
+    }
+    const int64_t first = f(9);
+    for (int i = 0; i < 100; ++i) assert(f(9) == first);
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -512,6 +652,11 @@ int main() {
     e4_boundary_constant_condition_pruned_before_backend();
     e4_integration_nested_branches_all_paths();
     e4_deopt_select_value_exact_at_every_path();
-    std::printf("exec_codegen regression tests passed (20 assertions OK)\n");
+    e5_minimal_accumulator_loop_executes();
+    e5_variant_ivs_and_branch_bodies();
+    e5_boundary_zero_trip_and_negative_bounds();
+    e5_integration_two_sequential_loops();
+    e5_deopt_loop_values_exact_and_repeatable();
+    std::printf("exec_codegen regression tests passed (25 assertions OK)\n");
     return 0;
 }

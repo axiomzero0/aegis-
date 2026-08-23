@@ -52,9 +52,11 @@ using namespace aegis;
 
 // ---- Benchmark parameters (Rule 61: named + documented) ----
 
-/// Timed calls per repetition per case. 200k gives a stable median on
-/// ~10ns-scale calls while keeping the suite under a few seconds.
-constexpr int64_t kCallsPerCase = 200'000;
+/// Timed calls per repetition per case. 50k gives a stable median for
+/// ~2-20ns calls; loop cases run up to ~100 iterations per call and
+/// the interpreter reference must execute them all, so the budget
+/// also bounds total wall time (200k made the suite take minutes).
+constexpr int64_t kCallsPerCase = 50'000;
 
 /// Timing repetitions per case; the median is reported.
 constexpr int kTimingReps = 3;
@@ -142,7 +144,7 @@ volatile int64_t g_sink = 0;
 // are not, and the corpus respects that).
 
 int interp_stmts(const ASTNode& n, std::vector<int64_t>& env,
-                 const std::vector<SymbolId>& names,
+                 std::vector<SymbolId>& names,
                  int64_t& exit_value, bool& exited);
 
 [[nodiscard]] int64_t interp_expr_sym(const ASTNode& n,
@@ -203,7 +205,7 @@ int interp_stmts(const ASTNode& n, std::vector<int64_t>& env,
 
 // Returns 0 to continue, 1 when a Return executed (exit_value set).
 int interp_stmts(const ASTNode& n, std::vector<int64_t>& env,
-                 const std::vector<SymbolId>& names,
+                 std::vector<SymbolId>& names,
                  int64_t& exit_value, bool& exited) {
     if (exited) return 1;
     switch (n.kind) {
@@ -244,6 +246,29 @@ int interp_stmts(const ASTNode& n, std::vector<int64_t>& env,
                                         : s.else_branch.get();
             if (arm) return interp_stmts(*arm, env, names, exit_value, exited);
             return 0;
+        }
+        case ASTKind::ForStmt: {
+            const auto& s = static_cast<const ASTForStmt&>(n);
+            // Corpus contract: iter is the `lo..hi` range form.
+            if (!s.iter || s.iter->kind != ASTKind::RangeExpr) {
+                std::fprintf(stderr, "interp: non-range for\n");
+                std::abort();
+            }
+            const auto& range =
+                static_cast<const ASTRangeExpr&>(*s.iter);
+            const int64_t lo = interp_expr_sym(*range.lo, env, names);
+            const int64_t hi = interp_expr_sym(*range.hi, env, names);
+            names.push_back(s.var_name);
+            env.push_back(0);
+            for (int64_t i = lo; i < hi; ++i) {
+                env.back() = i;
+                if (interp_stmts(*s.body, env, names, exit_value,
+                                 exited) != 0)
+                    break;
+            }
+            names.pop_back();
+            env.pop_back();
+            return exited ? 1 : 0;
         }
         case ASTKind::ReturnStmt: {
             const auto& s = static_cast<const ASTReturnStmt&>(n);
@@ -316,8 +341,12 @@ struct CompiledCase {
         }
     }
     if (out.statement_mode) {
-        // Flatten: params, then every let/var in the block (the
-        // corpus only binds at the top level of the function body).
+        // Flatten: params, then every let/var in the block (the corpus
+        // only binds at the top level of the function body). For-loop
+        // variables are intentionally NOT pre-registered: the
+        // interpreter binds them at the loop's own scope, and a
+        // pre-registered copy would SHADOW the live iteration value
+        // with a stale one (reads resolve the first match).
         for (const auto& s : body.stmts) {
             if (!s) continue;
             if (s->kind == ASTKind::LetStmt) {
@@ -384,11 +413,18 @@ struct CompiledCase {
         for (const auto& mi : mf.instrs) {
             if (mi.op != "ret") continue;
             std::vector<VRegId> work;
+            // Loop phis have TWO defs (preheader init + back-edge
+            // update), so the def-chain walk can cycle; the visited
+            // set terminates it (the pre-fix walk looped forever on
+            // the first loop case).
+            std::vector<uint8_t> visited(max_v + 1, 0);
             if (mi.uses[0] != kInvalidVReg) work.push_back(mi.uses[0]);
             while (!work.empty()) {
                 const VRegId v = work.back();
                 work.pop_back();
                 if (v == kInvalidVReg || v > max_v) continue;
+                if (visited[v] != 0) continue;
+                visited[v] = 1;
                 if (def_at[v] == -1) {
                     err = name + ": vreg v" + std::to_string(v) +
                           " is read but never defined (unemittable node "
@@ -485,6 +521,38 @@ struct CaseSpec {
          "    return t + (a & b);\n"
          "}",
          {{0, 0}, {1, 2}, {2, 1}, {-5, 5}, {123, -7}, {-13, -4}}},
+        {"rt_loop_sum",
+         "fn f(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { s = s + i; }\n"
+         "    return s;\n"
+         "}",
+         {{0}, {1}, {5}, {100}, {-3}}},
+        {"rt_loop_ivs",
+         "fn f(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { s = s + i * 3; }\n"
+         "    return s;\n"
+         "}",
+         {{0}, {1}, {5}, {50}, {-3}}},
+        {"rt_loop_branch",
+         "fn f(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n {\n"
+         "        if i > 2 { s = s + i; } else { s = s + 2; }\n"
+         "    }\n"
+         "    return s;\n"
+         "}",
+         {{0}, {1}, {3}, {20}, {-3}}},
+        {"rt_loop_two",
+         "fn f(n: i32) -> i32 {\n"
+         "    var s = 0;\n"
+         "    for i in 0..n { s = s + i; }\n"
+         "    var t = s * 2;\n"
+         "    for j in 0..n { t = t + j; }\n"
+         "    return t;\n"
+         "}",
+         {{0}, {1}, {4}, {25}, {-3}}},
         {"rt_branch_nested",
          "fn f(a: i32, b: i32) -> i32 {\n"
          "    var t = 0;\n"

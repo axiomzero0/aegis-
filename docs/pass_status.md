@@ -62,10 +62,15 @@ Legend:
 
 ## Backend-executable status (context)
 
-Straight-line integer arithmetic AND branch merges execute natively
-(ExecEncoder: full ALU/div/shift/setcc + branchless select via
-mov/test/cmovne; `bench_runtime` proves correctness against an AST
-interpreter and measures 13–22x over interpretation). Not yet
-executable: loops (back-edge jumps), calls, memory operations — each
-rejected loudly by the encoder and by the harness's no-silent-omission
-guard, never silently dropped.
+Straight-line integer arithmetic, branch merges, AND source-level
+loops execute natively (ExecEncoder: full ALU/div/shift/setcc set,
+branchless select via mov/test/cmovne, and structured loop lowering —
+preheader phi-initialization, `jz` exit check, back-edge register
+updates, `jmp`, with label backpatching and linear-scan intervals
+loop-widened so values live across back edges keep their registers).
+`bench_runtime` proves correctness against an AST interpreter
+(statement-level, including loops) and measures 13–24x over
+interpretation; loops run at 10–17 ns/call. Not yet executable: calls,
+memory operations, nested loops — each rejected loudly by the encoder
+and by the harness's no-silent-omission guard, never silently
+dropped.

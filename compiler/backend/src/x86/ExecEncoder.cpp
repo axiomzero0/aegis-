@@ -14,6 +14,7 @@
 #include "aegis/backend/x86/ExecEncoder.hpp"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "aegis/backend/ElfConstants.hpp"
 #include "aegis/backend/x86/Target_x86.hpp"
@@ -62,6 +63,10 @@ constexpr uint8_t kOpEscape2Byte{0x0F};  // two-byte opcode escape
 constexpr uint8_t kOpImulRR{0xAF};       // 0F AF /r : imul r64, r/m64
 constexpr uint8_t kOpMovzxR64R8{0xB6};   // 0F B6 /r : movzx r64, r/m8
 constexpr uint8_t kOpCmovNe{0x45};       // 0F 45 /r : cmovne r64, r/m64
+constexpr uint8_t kOpJmpRel32{0xE9};     // E9 cd : jmp rel32
+constexpr uint8_t kOpJzRel32{0x84};      // 0F 84 cd : jz rel32 (ZF=1)
+/// Displacement width of a rel32 jump (both jmp and jz).
+constexpr uint32_t kRel32DispBytes{4};
 
 // F7-group /n register-field selectors.
 constexpr uint8_t kGrpNot{2};
@@ -119,6 +124,31 @@ constexpr uint8_t kModrmXorEdxEax{0xD2};
 struct Encoder {
     std::vector<uint8_t>& buf;
     std::string err;
+    // ---- Label resolution (loop emission). ----
+    // Labels are ids chosen by instruction selection; positions are
+    // recorded when the `label` pseudo-instr is reached, and rel32
+    // jump sites are backpatched at the end (Rule D.3: a jump to an
+    // UNSEEN label fails loudly rather than emitting 0 displacement).
+    std::vector<int64_t> label_pos{};
+    std::vector<std::pair<uint32_t, int64_t>> jump_fixups{};
+
+    void define_label(int64_t id) {
+        if (id < 0) return;
+        if (static_cast<size_t>(id) >= label_pos.size()) {
+            label_pos.resize(static_cast<size_t>(id) + 1, -1);
+        }
+        label_pos[static_cast<size_t>(id)] =
+            static_cast<int64_t>(buf.size());
+    }
+    // Records a rel32 fixup whose displacement field STARTS at the
+    // current buffer end (the 4 placeholder bytes are appended next).
+    void add_fixup(int64_t label) {
+        jump_fixups.emplace_back(static_cast<uint32_t>(buf.size()), label);
+    }
+    [[nodiscard]] int64_t label_position(int64_t id) const noexcept {
+        if (id < 0 || static_cast<size_t>(id) >= label_pos.size()) return -1;
+        return label_pos[static_cast<size_t>(id)];
+    }
 
     void put(uint8_t b) { buf.push_back(b); }
     void put_u64(uint64_t v) {
@@ -447,6 +477,40 @@ bool encode_executable(const MachineFunction& fn,
             enc.movzx_rax_al(dst);
             continue;
         }
+        if (mi.op == "mov") {
+            // Plain register move (loop-phi initialization at the
+            // preheader and back-edge update at the jump tail).
+            uint16_t dst, src;
+            if (!home_of(ra, mi.defs[0], dst, enc, ctx) ||
+                !home_of(ra, mi.uses[0], src, enc, ctx)) return false;
+            enc.mov_rr(dst, src);
+            continue;
+        }
+        if (mi.op == "label") {
+            if (!mi.has_imm) { err = ctx + ": label without id"; return false; }
+            enc.define_label(mi.imm);
+            continue;
+        }
+        if (mi.op == "jmp") {
+            if (!mi.has_imm) { err = ctx + ": jmp without target"; return false; }
+            enc.put(kOpJmpRel32);
+            enc.add_fixup(mi.imm);
+            for (uint32_t i = 0; i < kRel32DispBytes; ++i) enc.put(0);
+            continue;
+        }
+        if (mi.op == "jz") {
+            // Branch if cond == 0 (the exit check of a loop): test the
+            // 0/1 selector, then jz rel32.
+            if (!mi.has_imm) { err = ctx + ": jz without target"; return false; }
+            uint16_t cond;
+            if (!home_of(ra, mi.uses[0], cond, enc, ctx)) return false;
+            enc.op_rm_r(kOpTestRR, cond, cond);
+            enc.put(kOpEscape2Byte);
+            enc.put(kOpJzRel32);
+            enc.add_fixup(mi.imm);
+            for (uint32_t i = 0; i < kRel32DispBytes; ++i) enc.put(0);
+            continue;
+        }
         if (mi.op == "select") {
             // dst = cond ? tv : fv, branchless:
             //   mov dst, fv ; test cond, cond ; cmovne dst, tv
@@ -477,6 +541,28 @@ bool encode_executable(const MachineFunction& fn,
     if (!saw_ret) {
         err = "machine function '" + fn.name + "' has no return";
         return false;
+    }
+    // ---- Resolve jump fixups. ----
+    for (const auto& [disp_pos, label] : enc.jump_fixups) {
+        const int64_t target = enc.label_position(label);
+        if (target < 0) {
+            err = "jump to undefined label " + std::to_string(label);
+            return false;
+        }
+        // rel32 is relative to the END of the jump instruction.
+        const int64_t rel = target -
+            (static_cast<int64_t>(disp_pos) + kRel32DispBytes);
+        // Range check (Rule 73): a generated function this large is a
+        // bug, not a workload.
+        if (rel < INT32_MIN || rel > INT32_MAX) {
+            err = "jump displacement out of rel32 range";
+            return false;
+        }
+        const auto u = static_cast<uint32_t>(rel);
+        for (uint32_t i = 0; i < kRel32DispBytes; ++i) {
+            out[disp_pos + i] = static_cast<uint8_t>(
+                (u >> (i * elf::kBitsPerByte)) & elf::kByteMask);
+        }
     }
     return true;
 }

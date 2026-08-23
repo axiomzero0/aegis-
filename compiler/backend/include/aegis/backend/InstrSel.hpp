@@ -13,6 +13,15 @@
 #include "aegis/ir/Graph.hpp"
 
 namespace aegis {
+
+// Per-node instruction collected during selection (node id + its
+// machine instruction) — shared between the flat scheduler and the
+// structured loop emitter.
+struct NodeInstr {
+    NodeId node;
+    MachineInstr mi;
+};
+
 class InstrSelector {
 public:
     InstrSelector(Graph& g) : g_(g) {}
@@ -22,5 +31,17 @@ public:
     MachineFunction lower(std::string_view fn_name);
 private:
     Graph& g_;
+
+    // Structured emission for functions containing loops: per loop —
+    // phi-init movs, head label, body closure (topo order, phis are
+    // pre-defined leaves), jz-exit, back-edge phi updates, jmp, exit
+    // label — then post-loop code from the return operand. Declared
+    // here; defined in the .cpp as a free function friended by use of
+    // the public NodeInstr vector.
+    void emit_structured_loops(const std::vector<NodeId>& loops,
+                               std::vector<NodeInstr>& per_node,
+                               std::vector<VRegId>& vreg_per_node,
+                               VRegId& next_vreg,
+                               MachineFunction& mf);
 };
 } // namespace aegis

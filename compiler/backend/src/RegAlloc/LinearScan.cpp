@@ -49,6 +49,44 @@ void LinearScanAllocator::compute_intervals(std::vector<LiveInterval>& out) {
             rc[v] = mi.rc;
         }
     }
+    // ---- LOOP WIDENING (correctness with back edges). ----
+    //
+    // Straight-line first/last indices ignore that a loop RE-EXECUTES
+    // its body: a vreg defined before the loop and used inside it is
+    // read again on every iteration, so its interval must extend to
+    // the back edge (the matching jmp). Without this, the allocator
+    // hands its register to a body temporary and the next iteration
+    // reads a clobbered value — observed as a loop returning its
+    // entry accumulator (param n's register reused for s_next).
+    {
+        // Find loop spans: `label L` ... `jmp L` (the structured loop
+        // emitter always emits this exact pair).
+        std::vector<std::pair<uint32_t, uint32_t>> spans;
+        for (uint32_t i = 0; i < mf_.instrs.size(); ++i) {
+            const MachineInstr& mi = mf_.instrs[i];
+            if (!mi.has_imm) continue;
+            if (mi.op == "label") {
+                for (uint32_t j = i + 1; j < mf_.instrs.size(); ++j) {
+                    const MachineInstr& mj = mf_.instrs[j];
+                    if (mj.op == "jmp" && mj.has_imm && mj.imm == mi.imm) {
+                        spans.emplace_back(i, j);
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto& [head, tail] : spans) {
+            for (VRegId v = 0; v <= max_v; ++v) {
+                if (first[v] == 0xFFFFFFFFu) continue;
+                // Live across the loop head and still active at/after
+                // it -> must survive to the back edge.
+                if (first[v] < head && last[v] >= head &&
+                    last[v] < tail) {
+                    last[v] = tail;
+                }
+            }
+        }
+    }
     for (VRegId v = 0; v <= max_v; ++v) {
         if (first[v] == 0xFFFFFFFFu) continue;
         out.push_back(LiveInterval{v, rc[v], first[v], last[v] + 1});
