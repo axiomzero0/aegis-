@@ -34,6 +34,8 @@ enum class TelemetryEvent : uint8_t {
     PassBudgetExceeded        = 4,  // pass ran past its wall-clock budget.
     PassNodeCountOverflow     = 5,  // graph too large for the pass.
     PassAliasAnalysisFailed   = 6,  // CFL-Alias couldn't prove; skip reordering.
+    // ---- Pass success paths (Rule 65: wins are observable too) ----
+    PassOptimized             = 12, // pass performed a profitable rewrite.
     // ---- Register allocator ----
     RegAllocSpillOverflow     = 7,  // spilled more than 25% of vregs.
     RegAllocNoFreeReg         = 8,  // no free PReg available.

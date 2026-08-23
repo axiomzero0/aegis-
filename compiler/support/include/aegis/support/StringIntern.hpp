@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -51,13 +52,19 @@ private:
     struct InternedEntry {
         std::string data;
     };
-    std::vector<InternedEntry> entries_{};
+    std::deque<InternedEntry> entries_{};
 
     // Hash-consing map: string_view -> SymbolId. Uses string_view as key
     // into stable storage held in `entries_`. The view lifetime is tied
     // to the entry's string, which is stable (vector only grows, never
     // moves the contents of std::string on push_back).
     //
+    // STORAGE STABILITY (Rule 73): the map keys are string_views into
+    // the OWNED strings below. std::deque guarantees existing elements
+    // NEVER move on push_back (a std::vector reallocates and moves
+    // every SSO buffer, dangling every key — a latent use-after-free
+    // found by ASan after enough interning; deque removes the entire
+    // failure mode).
     // We use std::string_view as the map key but it's safe because
     // `entries_[i].data` address is stable for the lifetime of the
     // SymbolTable. The comparison uses std::string_view equality.

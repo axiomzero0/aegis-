@@ -13,6 +13,75 @@ namespace {
 /// Bits per byte — bounds the x86-64 shift-count immediate to the
 /// architectural range [0, 63] (Rule D.1: named, not a literal).
 constexpr int64_t g_BitsPerByte{8};
+/// Depth bound for the region-chain walk below (nested-merge lookups
+/// are shallow; the bound only guards against malformed graphs).
+constexpr uint32_t g_MaxRegionWalkDepth{64};
+
+// Collect every If reachable from a control node down the pred chain
+// (Proj -> its If; Region -> recurse into its preds). These are all
+// the decisions that had to be made for control to reach this point.
+void collect_ifs(const Graph& g, NodeId ctrl, std::vector<NodeId>& out,
+                 uint32_t depth = 0) {
+    if (ctrl == kInvalidNodeId || ctrl >= g.size() || depth > g_MaxRegionWalkDepth)
+        return;
+    if (g[ctrl].kind == NodeKind::Proj) {
+        const NodeId base = g[ctrl].inputs.empty()
+            ? kInvalidNodeId : g[ctrl].inputs[0];
+        if (base != kInvalidNodeId && base < g.size() &&
+            g[base].kind == NodeKind::If) {
+            bool have = false;
+            for (NodeId f : out) {
+                if (f == base) { have = true; break; }
+            }
+            if (!have) out.push_back(base);
+            // CONTINUE UP: the If's own ctrl input carries the
+            // ENCLOSING decisions (a nested branch is only reachable
+            // through its parent's projection). Without this walk the
+            // pred chains of a nested merge share nothing and the
+            // divergence point can't be found (Rule 73).
+            if (g[base].inputs.size() >= ir::shape::kIfInputs) {
+                collect_ifs(g, g[base].inputs[0], out, depth + 1);
+            }
+        }
+        return;
+    }
+    if (g[ctrl].kind == NodeKind::Region) {
+        for (NodeId pred : g[ctrl].inputs) {
+            collect_ifs(g, pred, out, depth + 1);
+        }
+    }
+}
+
+// Resolve the If that GOVERNS a merge region: the decision at which
+// the region's preds DIVERGED. That is the If reachable from EVERY
+// pred chain (for a direct if-merge, each pred chain contains exactly
+// the same one If; for nested merges each chain also contains the
+// chain's own inner Ifs, which are NOT shared). Return the unique
+// common If, or invalid.
+NodeId governing_if(const Graph& g, NodeId region) {
+    if (region == kInvalidNodeId || region >= g.size()) return kInvalidNodeId;
+    std::vector<std::vector<NodeId>> per_pred;
+    for (NodeId pred : g[region].inputs) {
+        if (pred == kInvalidNodeId || pred >= g.size()) continue;
+        std::vector<NodeId> ifs;
+        collect_ifs(g, pred, ifs);
+        if (!ifs.empty()) per_pred.push_back(std::move(ifs));
+    }
+    if (per_pred.empty()) return kInvalidNodeId;
+    // Intersect: candidates from the first chain present in all others.
+    for (NodeId cand : per_pred[0]) {
+        bool shared = true;
+        for (size_t i = 1; i < per_pred.size(); ++i) {
+            bool found = false;
+            for (NodeId f : per_pred[i]) {
+                if (f == cand) { found = true; break; }
+            }
+            if (!found) { shared = false; break; }
+        }
+        if (shared) return cand;
+    }
+    return kInvalidNodeId;
+}
 /// DFS states for the topological scheduler.
 constexpr uint8_t g_VisitNew{0}, g_VisitOnStack{1}, g_VisitDone{2};
 // Mnemonic for a binary op. Returns nullptr when the kind has no
@@ -157,6 +226,33 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                 per_node.emplace_back(id, mi);
                 break;
             }
+            case NodeKind::Phi: {
+                // MERGE phi (region-pred) -> `select` pseudo-instr:
+                // dst = cond ? then_val : else_val. The condition is
+                // recovered from the region's If (region inputs are
+                // the If's two Projs). Loop-pred phis are cyclic and
+                // are NOT collected (the harness guard rejects their
+                // undefined vregs loudly — loops are not emitted yet).
+                if (n.inputs.size() != ir::shape::kPhiInputs2Branches) break;
+                const NodeId region = n.inputs[0];
+                if (region == kInvalidNodeId || region >= g_.size()) break;
+                if (g_[region].kind != NodeKind::Region) break;
+                // Find the If governing the region (direct Proj case
+                // or through nested merge Regions).
+                const NodeId if_node = governing_if(g_, region);
+                if (if_node == kInvalidNodeId) break;
+                if (g_[if_node].inputs.size() != ir::shape::kIfInputs) break;
+                const NodeId cond = g_[if_node].inputs[ir::shape::kIfCondIndex];
+                if (cond == kInvalidNodeId || cond >= g_.size()) break;
+                MachineInstr mi;
+                mi.op = "select";
+                mi.defs[0] = get_or_assign(id);
+                mi.uses[0] = get_or_assign(cond);        // 0/1 selector
+                mi.uses[1] = get_or_assign(n.inputs[1]); // then value
+                mi.uses[2] = get_or_assign(n.inputs[2]); // else value
+                per_node.emplace_back(id, mi);
+                break;
+            }
             case NodeKind::Parameter: {
                 // ABI entry pseudo-instruction: defs[0] = the vreg that
                 // carries this parameter, imm = the argument index.
@@ -219,9 +315,14 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
             stack.push_back(Frame{node_id, false});
             while (!stack.empty()) {
                 Frame& top = stack.back();
+                // Capture the node id by value: every use of `top`
+                // AFTER a push_back below would read through a
+                // dangling reference when the stack vector reallocates
+                // (ASan-caught; Rule 73).
+                const NodeId top_node = top.node;
                 if (!top.expanded) {
-                    if (state[top.node] == g_VisitDone) { stack.pop_back(); continue; }
-                    state[top.node] = g_VisitOnStack;
+                    if (state[top_node] == g_VisitDone) { stack.pop_back(); continue; }
+                    state[top_node] = g_VisitOnStack;
                     // Mark expanded BEFORE any push_back — pushing may
                     // reallocate the vector and dangle `top` (Rule 73).
                     top.expanded = true;
@@ -244,22 +345,53 @@ MachineFunction InstrSelector::lower(std::string_view fn_name) {
                         stack.push_back(Frame{in, false});
                         pushed_any = true;
                     }
+                    // A select's condition lives on the If, not on the
+                    // Phi — visit it explicitly so the compare that
+                    // produces the 0/1 selector is emitted BEFORE the
+                    // select (the Phi's own input list would not order
+                    // it; Rule 73). Uses ONLY the captured id (no
+                    // `top` here — pushes may have reallocated).
+                    if (g_[top_node].kind == NodeKind::Phi &&
+                        ins.size() == ir::shape::kPhiInputs2Branches &&
+                        ins[0] < g_.size() &&
+                        g_[ins[0]].kind == NodeKind::Region) {
+                        for (NodeId pred : g_[ins[0]].inputs) {
+                            if (pred == kInvalidNodeId || pred >= g_.size())
+                                continue;
+                            if (g_[pred].kind != NodeKind::Proj) continue;
+                            const NodeId base = g_[pred].inputs.empty()
+                                ? kInvalidNodeId : g_[pred].inputs[0];
+                            if (base == kInvalidNodeId || base >= g_.size())
+                                continue;
+                            if (g_[base].kind != NodeKind::If) continue;
+                            if (g_[base].inputs.size() !=
+                                ir::shape::kIfInputs) continue;
+                            const NodeId cond =
+                                g_[base].inputs[ir::shape::kIfCondIndex];
+                            if (cond == kInvalidNodeId || cond >= g_.size())
+                                continue;
+                            if (instr_of[cond] == -1 || state[cond] != 0)
+                                continue;
+                            stack.push_back(Frame{cond, false});
+                            pushed_any = true;
+                        }
+                    }
                     if (!pushed_any) {
-                        // Leaf: emit now (no pushes happened, `top` is
-                        // still valid).
+                        // Leaf: emit now (no pushes happened; still use
+                        // the captured id for uniformity).
                         mf.instrs.push_back(per_node[static_cast<size_t>(
-                            instr_of[top.node])].second);
-                        state[top.node] = g_VisitDone;
+                            instr_of[top_node])].second);
+                        state[top_node] = g_VisitDone;
                         stack.pop_back();
                     }
                     continue;
                 }
                 // Expanded: all children processed when control returns
                 // here — emit and finish. (No push happens on this
-                // path, so `top` is stable.)
+                // path; the captured id keeps it reallocation-safe.)
                 mf.instrs.push_back(per_node[static_cast<size_t>(
-                    instr_of[top.node])].second);
-                state[top.node] = g_VisitDone;
+                    instr_of[top_node])].second);
+                state[top_node] = g_VisitDone;
                 stack.pop_back();
             }
         }

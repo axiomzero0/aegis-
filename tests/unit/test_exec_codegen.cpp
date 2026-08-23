@@ -18,6 +18,14 @@
 //       topological (post-order DFS) scheduler in instruction
 //       selection.
 //
+//   E4  BRANCH/SELECT EMISSION: merge phis lower to branchless
+//       `select` (mov/test/cmovne). Two defects were fixed on the
+//       way: (a) nested merges need the DIVERGENCE-point If — the
+//       condition common to every pred chain, found by walking
+//       through each If's ctrl input up to the enclosing decisions —
+//       and (b) the scheduler visited a select's condition through a
+//       reference that push_back could dangle (ASan-caught).
+//
 //   E3  DEAD-INSTR CLOBBER: selecting a constant shift amount into
 //       the immediate form left the shift-count Constant node emitting
 //       a `mov_imm` with NO users; its vreg had no interval, defaulted
@@ -89,6 +97,41 @@ using Fn4 = int64_t (*)(int64_t, int64_t, int64_t, int64_t);
     if (lsa.run() != 0) { err = "spilled (zero-spill contract)"; return nullptr; }
     std::vector<uint8_t> code;
     if (!backend::x86::encode_executable(mf, lsa, code, err)) return nullptr;
+    // NO-SILENT-OMISSION GUARD (mirrors bench_runtime): every vreg
+    // the return reads must be defined (catches unemittable nodes in
+    // the closure instead of executing an undefined register).
+    {
+        VRegId max_v = 0;
+        for (const auto& mi : mf.instrs) {
+            if (mi.defs[0] != kInvalidVReg && mi.defs[0] > max_v)
+                max_v = mi.defs[0];
+            for (VRegId u : mi.uses) {
+                if (u != kInvalidVReg && u > max_v) max_v = u;
+            }
+        }
+        std::vector<int64_t> def_at(max_v + 1, -1);
+        for (size_t i = 0; i < mf.instrs.size(); ++i) {
+            if (mf.instrs[i].defs[0] != kInvalidVReg) {
+                def_at[mf.instrs[i].defs[0]] = static_cast<int64_t>(i);
+            }
+        }
+        for (const auto& mi : mf.instrs) {
+            if (mi.op != "ret") continue;
+            std::vector<VRegId> work;
+            if (mi.uses[0] != kInvalidVReg) work.push_back(mi.uses[0]);
+            while (!work.empty()) {
+                const VRegId v = work.back();
+                work.pop_back();
+                if (v == kInvalidVReg || v > max_v) continue;
+                if (def_at[v] == -1) return nullptr; // undefined read
+                for (VRegId u :
+                     mf.instrs[static_cast<size_t>(def_at[v])].uses) {
+                    if (u != kInvalidVReg && u <= max_v) work.push_back(u);
+                }
+            }
+            break;
+        }
+    }
 
     void* page = mem.allocate(code.size(), 1);
     if (page == nullptr) { err = "MemManager allocation"; return nullptr; }
@@ -342,6 +385,110 @@ int e3_deopt_no_side_effects_from_dead_defs() {
     return 0;
 }
 
+// ---- E4: branch/select emission (executed correctness) ----
+
+int e4_minimal_if_else_selects() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(a: i32, b: i32) -> i32 {\n"
+        "    var t = 0;\n"
+        "    if a < b { t = 1; } else { t = 2; }\n"
+        "    return t;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn2>(p);
+    assert(f(1, 2) == 1);
+    assert(f(2, 1) == 2);
+    assert(f(0, 0) == 2); // equal: cond false
+    return 0;
+}
+
+int e4_variant_branch_arith_arms() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(a: i32, b: i32) -> i32 {\n"
+        "    var t = 0;\n"
+        "    if a < b { t = a * 7 + (b << 2); } else { t = (a - b) * 3 + (b >> 1); }\n"
+        "    return t + (a & b);\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn2>(p);
+    assert(f(1, 2) == 15);
+    assert(f(123, -7) == 507);
+    return 0;
+}
+
+int e4_boundary_constant_condition_pruned_before_backend() {
+    jit::MemManager mem;
+    std::string err;
+    // SimplifyControl prunes constant branches; what remains must
+    // still be correct (the fix must not over-correct into requiring
+    // a select for pruned merges).
+    void* p = compile_to_executable(
+        "fn f(a: i32) -> i32 {\n"
+        "    var t = 0;\n"
+        "    if 1 < 2 { t = a + 1; } else { t = a - 1; }\n"
+        "    return t;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn1>(p);
+    assert(f(41) == 42);
+    return 0;
+}
+
+int e4_integration_nested_branches_all_paths() {
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(a: i32, b: i32) -> i32 {\n"
+        "    var t = 0;\n"
+        "    if a < b {\n"
+        "        if a + b > 0 { t = 10; } else { t = 20; }\n"
+        "    } else {\n"
+        "        if a - b > 0 { t = 30; } else { t = 40; }\n"
+        "    }\n"
+        "    return t;\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn2>(p);
+    // All four leaves reachable.
+    assert(f(1, 2) == 10);    // then, inner-true
+    assert(f(-5, 3) == 20);   // then, inner-false
+    assert(f(9, 2) == 30);    // else, inner-true
+    assert(f(-5, -9) == 30);  // else, inner-true (-5-(-9)=4>0)
+    assert(f(-9, -5) == 20);  // then, inner-false (-9+-5=-14 not > 0)
+    return 0;
+}
+
+int e4_deopt_select_value_exact_at_every_path() {
+    // The deopt/state category: values through control flow must be
+    // exact on every path — pinned across a grid including negatives.
+    jit::MemManager mem;
+    std::string err;
+    void* p = compile_to_executable(
+        "fn f(a: i32, b: i32) -> i32 {\n"
+        "    var t = 0;\n"
+        "    if a < b { t = a - b; } else { t = b - a; }\n"
+        "    return t * (a + b);\n"
+        "}",
+        mem, err);
+    assert(p != nullptr);
+    auto f = reinterpret_cast<Fn2>(p);
+    for (int64_t a : {-7, -1, 0, 1, 3, 12}) {
+        for (int64_t b : {-9, -2, 0, 2, 5, 40}) {
+            const int64_t t = (a < b) ? (a - b) : (b - a);
+            assert(f(a, b) == t * (a + b));
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -360,6 +507,11 @@ int main() {
     e3_boundary_shift_zero_and_full_width();
     e3_integration_strength_reduced_then_shifted();
     e3_deopt_no_side_effects_from_dead_defs();
-    std::printf("exec_codegen regression tests passed (15 assertions OK)\n");
+    e4_minimal_if_else_selects();
+    e4_variant_branch_arith_arms();
+    e4_boundary_constant_condition_pruned_before_backend();
+    e4_integration_nested_branches_all_paths();
+    e4_deopt_select_value_exact_at_every_path();
+    std::printf("exec_codegen regression tests passed (20 assertions OK)\n");
     return 0;
 }

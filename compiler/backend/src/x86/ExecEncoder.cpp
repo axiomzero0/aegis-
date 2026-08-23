@@ -61,6 +61,7 @@ constexpr uint8_t kOpCqo{0x99};          // cqo (with REX.W)
 constexpr uint8_t kOpEscape2Byte{0x0F};  // two-byte opcode escape
 constexpr uint8_t kOpImulRR{0xAF};       // 0F AF /r : imul r64, r/m64
 constexpr uint8_t kOpMovzxR64R8{0xB6};   // 0F B6 /r : movzx r64, r/m8
+constexpr uint8_t kOpCmovNe{0x45};       // 0F 45 /r : cmovne r64, r/m64
 
 // F7-group /n register-field selectors.
 constexpr uint8_t kGrpNot{2};
@@ -444,6 +445,24 @@ bool encode_executable(const MachineFunction& fn,
                       : is_gt ? kSetccGt
                               : kSetccGe);
             enc.movzx_rax_al(dst);
+            continue;
+        }
+        if (mi.op == "select") {
+            // dst = cond ? tv : fv, branchless:
+            //   mov dst, fv ; test cond, cond ; cmovne dst, tv
+            // (cond is a 0/1 value; ZF=0 means nonzero means true.)
+            uint16_t dst, cond, tv, fv;
+            if (!home_of(ra, mi.defs[0], dst, enc, ctx) ||
+                !home_of(ra, mi.uses[0], cond, enc, ctx) ||
+                !home_of(ra, mi.uses[1], tv, enc, ctx) ||
+                !home_of(ra, mi.uses[2], fv, enc, ctx)) return false;
+            enc.mov_rr(dst, fv);
+            enc.op_rm_r(kOpTestRR, cond, cond);
+            enc.rex(dst >= kRegR8, tv >= kRegR8);
+            enc.put(kOpEscape2Byte);
+            enc.put(kOpCmovNe);
+            // CMOVcc r64, r/m64: reg field = destination, r/m = source.
+            enc.modrm(dst, tv);
             continue;
         }
         if (mi.op == "load" || mi.op == "store") {

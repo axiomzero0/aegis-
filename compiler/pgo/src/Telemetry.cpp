@@ -29,6 +29,7 @@ const char* event_name(TelemetryEvent ev) noexcept {
         case TelemetryEvent::PassBudgetExceeded:         return "pass_budget_exceeded";
         case TelemetryEvent::PassNodeCountOverflow:      return "pass_node_count_overflow";
         case TelemetryEvent::PassAliasAnalysisFailed:    return "pass_alias_analysis_failed";
+        case TelemetryEvent::PassOptimized:              return "pass_optimized";
         case TelemetryEvent::RegAllocSpillOverflow:      return "regalloc_spill_overflow";
         case TelemetryEvent::RegAllocNoFreeReg:          return "regalloc_no_free_reg";
         case TelemetryEvent::VerifierFailed:             return "verifier_failed";

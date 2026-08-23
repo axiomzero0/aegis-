@@ -34,14 +34,16 @@ green:
   AOT mode and install guard + FrameState in JIT mode).
 - **`compiler/backend/`** — `MachineIR`, `InstrSel` (SoN → MachineInstr,
   with a topological scheduler so folded constants never emit after
-  their uses, plus immediate-folding for constant shift counts and a
+  their uses, immediate-folding for constant shift counts, branch
+  merges lowered to branchless `select` (condition recovered from the
+  divergence-point If, nested merges included), and a
   dead-instruction sweep), `LinearScan` (Phase 1 register allocator
   per the spec), `ExecEncoder` (real x86-64 encodings — full integer
-  ALU/div/shift/setcc set, SysV parameter parallel-move with RAX
-  cycle staging, callee-saved prologue — producing directly
-  executable bytes), `Target` (abstract target interface for x86/ARM),
-  `Emitter` (real ELF64 object file writing), `ElfConstants`
-  (named ELF ABI constants per Rule D.1/D.2),
+  ALU/div/shift/setcc set plus cmov-based select, SysV parameter
+  parallel-move with RAX cycle staging, callee-saved prologue —
+  producing directly executable bytes), `Target` (abstract target
+  interface for x86/ARM), `Emitter` (real ELF64 object file writing),
+  `ElfConstants` (named ELF ABI constants per Rule D.1/D.2),
   `RegAlloc/RegAllocInterface` for plugging in alternative allocators.
 - **`compiler/jit/`** — `JitEngine` (hotness tracking + background
   compilation, Rule C.1), `Deopt` (deoptimization trampolines + state
@@ -70,7 +72,9 @@ green:
 - **`docs/`** — `laws.md` (the full Laws & Rules 36-76), `ir_spec.md`
   (formal E-SoN IR specification), `effect_system.md` (Pure/Altered/
   Crowded semantics), `abi.md` (C ABI + internal calling conventions),
-  `directory_layout.md` (this prescribed layout).
+  `directory_layout.md` (this prescribed layout), `pass_status.md`
+  (per-pass audit: what each optimization does TODAY and its exact
+  blocking dependency — Rules 70/71/74).
 - **CI (`docs/ci.workflow.yml`)** — the workflow enforcing the laws on
   every push and PR (checked in under docs/ because the push token
   lacks GitHub's `workflow` scope; copy it to
@@ -128,7 +132,7 @@ was intended — Rule 52), and commit it together with the pass change.
 
 | Rule | Where |
 |------|-------|
-| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (40 tests, 8 bugs) |
+| Rule 36 (5 regression tests per bug fix) | `tests/regression/` (45 tests, 9 bugs) + `tests/unit/test_exec_codegen.cpp` (20 assertions, 4 bug classes) |
 | Rule 37 (golden tests per pass) | `tests/integration/golden/` (31 passes × ≥10, both modes) |
 | Rule 38 (differential testing in CI) | `tests/integration/run_differential.py` + CI |
 | Rule 39 (weekly deopt-path testing) | CI `schedule:` job (extended corpus) |

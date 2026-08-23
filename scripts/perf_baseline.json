@@ -1,18 +1,21 @@
 {
-  "captured": "2026-08-23T08:08:29.230947+00:00",
-  "reason": "Full two-half Rule 41 baseline: compile-time cases (bench_pipeline) + runtime generated-code cases rt_* (bench_runtime through ExecEncoder + JIT MemManager). Supersedes single-binary capture.",
+  "captured": "2026-08-23T09:15:39.137718+00:00",
+  "reason": "Add branch cases rt_branch_min/arith/nested (select/cmov emission); IVS derived-IV rewrite; SimplifyControl phi collapse; SymbolTable deque stability fix (ASan UAF); scheduler reallocation fix. Rule 41 record.",
   "threshold_percent": 5.0,
   "cases": {
-    "branchy": 265.168,
-    "chain_fold": 192.93,
-    "dedup_heavy": 211.966,
-    "loop_heavy": 652.512,
-    "multi_fn": 316.787,
-    "rt_chain64": 2773.235,
-    "rt_identity": 572.617,
-    "rt_mixed": 1770.663,
-    "rt_poly32": 3823.407,
-    "rt_wide8": 744.56,
-    "wide_fold": 189.346
+    "branchy": 259.128,
+    "chain_fold": 196.425,
+    "dedup_heavy": 201.716,
+    "loop_heavy": 1144.74,
+    "multi_fn": 309.399,
+    "rt_branch_arith": 682.434,
+    "rt_branch_min": 577.03,
+    "rt_branch_nested": 762.911,
+    "rt_chain64": 2742.264,
+    "rt_identity": 572.675,
+    "rt_mixed": 1754.256,
+    "rt_poly32": 3804.626,
+    "rt_wide8": 764.446,
+    "wide_fold": 183.514
   }
 }

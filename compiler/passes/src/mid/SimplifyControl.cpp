@@ -91,7 +91,7 @@ int SimplifyControlPass::run(Graph& g, const PassBudget& budget) {
         // Find both Proj outputs.
         NodeId true_proj = kInvalidNodeId;
         NodeId false_proj = kInvalidNodeId;
-        for (NodeId user : g.outputs()[id].view()) {
+        for (NodeId user : g.users_snapshot(id)) {
             if (user >= g.size()) continue;
             const Node& u = g[user];
             if (u.kind != NodeKind::Proj) continue;
@@ -99,6 +99,52 @@ int SimplifyControlPass::run(Graph& g, const PassBudget& budget) {
             else if (u.payload.proj_index == 1) false_proj = user;
         }
         if (true_proj == kInvalidNodeId && false_proj == kInvalidNodeId) continue;
+
+        // CONSTANT-BRANCH PHI COLLAPSE: phis at the merge of THIS If's
+        // two projections become single-valued when the branch is
+        // constant — rewire their users to the TAKEN side's value and
+        // kill the phi. (Pre-fix the phi survived with a dangling
+        // region slot, leaving an ambiguous merge downstream — the
+        // value was only correct by accident of later passes.)
+        {
+            const bool taken_true =
+                cond_n.payload.i64 != 0; // cond is Constant (checked above)
+            for (NodeId proj : {true_proj, false_proj}) {
+                if (proj == kInvalidNodeId) continue;
+                for (NodeId r : g.users_snapshot(proj)) {
+                    if (r >= g.size()) continue;
+                    if (g[r].flags.has(NodeFlagBit::IsDead)) continue;
+                    if (g[r].kind != NodeKind::Region) continue;
+                    // The region must merge EXACTLY this If's two
+                    // projections (no third path joining in).
+                    if (g[r].inputs.size() != ir::shape::kPhiInputs2Branches - 1)
+                        continue;
+                    bool is_pair = true;
+                    for (NodeId rp : g[r].inputs) {
+                        if (rp != true_proj && rp != false_proj) {
+                            is_pair = false;
+                            break;
+                        }
+                    }
+                    if (!is_pair) continue;
+                    for (NodeId phi : g.users_snapshot(r)) {
+                        if (phi >= g.size()) continue;
+                        if (g[phi].flags.has(NodeFlagBit::IsDead)) continue;
+                        if (g[phi].kind != NodeKind::Phi) continue;
+                        if (g[phi].inputs.size() !=
+                            ir::shape::kPhiInputs2Branches) continue;
+                        if (g[phi].inputs[0] != r) continue;
+                        const NodeId taken =
+                            taken_true ? g[phi].inputs[1] : g[phi].inputs[2];
+                        for (NodeId pu : g.users_snapshot(phi)) {
+                            g.swap_input(pu, phi, taken);
+                        }
+                        g[phi].flags.set(NodeFlagBit::IsDead);
+                        ++removed;
+                    }
+                }
+            }
+        }
         // Rewire ALL users of both Projs to point at if_ctrl_in.
         // (Copy the user lists first because swap_input mutates them.)
         auto rewire_users = [&](NodeId proj_id) {

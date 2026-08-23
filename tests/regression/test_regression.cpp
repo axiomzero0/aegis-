@@ -68,6 +68,13 @@
 //           field snapshots; found by the new differential harness
 //           (Rule 38) on a 200-program corpus.
 //
+//   R11 SymbolTable stored its interning-map keys as string_views
+//       into a std::vector of owned strings — vector reallocation on
+//       push_back MOVES every SSO buffer, dangling every key. A
+//       latent use-after-free (ASan-confirmed) that silently produced
+//       wrong lookups for years of inputs until it segfaulted.
+//       Fix: entries live in a std::deque (elements never move).
+//
 //   R10 swap_input unlinked only ONE output-list entry per rewrite,
 //       but the output list carries one entry per EDGE and a node
 //       like `a + a` has TWO edges to the same operand. Multi-edge
@@ -901,6 +908,111 @@ int r10_deopt_use_def_stays_exact_under_dup_edges() {
     return 0;
 }
 
+// ============================================================
+// R11 — SymbolTable vector-realloc dangling interning keys.
+// ============================================================
+
+int r11_minimal_intern_across_reallocation_finds_original() {
+    SymbolTable syms;
+    const SymbolId first = syms.intern("alpha");
+    // Push enough entries to force several vector reallocations
+    // (capacity grows 1,2,4,8,16... — 100 interts guarantees many).
+    for (int i = 0; i < 100; ++i) {
+        syms.intern("sym" + std::to_string(i));
+    }
+    // Pre-fix: the map key for "alpha" pointed into freed memory;
+    // the lookup returned garbage (a duplicate id or invalid).
+    assert(syms.find("alpha") == first);
+    return 0;
+}
+
+int r11_variant_views_stable_after_growth() {
+    SymbolTable syms;
+    const SymbolId a = syms.intern("aaaa");   // SSO (short string)
+    const SymbolId b = syms.intern(std::string(64, 'b')); // heap string
+    for (int i = 0; i < 200; ++i) {
+        syms.intern("grow" + std::to_string(i));
+    }
+    // Both flavors of storage must still resolve and round-trip.
+    assert(syms.find("aaaa") == a);
+    assert(syms.find(std::string(64, 'b')) == b);
+    assert(syms.at(a) == "aaaa");
+    assert(syms.at(b).size() == 64);
+    return 0;
+}
+
+int r11_boundary_duplicate_intern_after_reallocation() {
+    // The exact silent-corruption shape: interting the SAME string
+    // again after growth must return the ORIGINAL id (pre-fix the
+    // dangling key compare could miss and mint a duplicate, mapping
+    // one name to two ids).
+    SymbolTable syms;
+    const SymbolId x = syms.intern("dup");
+    for (int i = 0; i < 64; ++i) syms.intern("pad" + std::to_string(i));
+    const SymbolId y = syms.intern("dup");
+    assert(x == y);
+    assert(syms.size() == 66); // no duplicate entry
+    return 0;
+}
+
+int r11_integration_compile_many_symbol_module() {
+    // End-to-end: a module with enough distinct identifiers to force
+    // multiple interning reallocations must compile and verify.
+    std::string src = "fn helper_0(v: i32) -> i32 { return v + 0; }\n";
+    for (int i = 1; i < 40; ++i) {
+        src += "fn helper_" + std::to_string(i) +
+               "(v: i32) -> i32 { return helper_" + std::to_string(i - 1) +
+               "(v) + " + std::to_string(i) + "; }\n";
+    }
+    src += "fn main() -> i32 { return helper_39(1); }\n";
+    int64_t v = 0;
+    if (!eval_source(src, v)) return 1; // pipeline + verifier inside
+    return 0;
+}
+
+int r11_deopt_symbol_identity_preserved_through_pipeline() {
+    // Symbol identity is what Call nodes carry; a corrupted table
+    // would silently redirect calls. Distinct callees must stay
+    // distinct after a symbol-heavy preamble.
+    const char* src =
+        "fn pad0() -> i32 { return 0; }\n"
+        "fn pad1() -> i32 { return 0; }\n"
+        "fn pad2() -> i32 { return 0; }\n"
+        "fn pad3() -> i32 { return 0; }\n"
+        "fn pad4() -> i32 { return 0; }\n"
+        "fn pad5() -> i32 { return 0; }\n"
+        "fn pad6() -> i32 { return 0; }\n"
+        "fn pad7() -> i32 { return 0; }\n"
+        "fn g(v: i32) -> i32 { return v + 1; }\n"
+        "fn h(v: i32) -> i32 { return v + 2; }\n"
+        "fn main() -> i32 { return g(10) + h(20); }\n";
+    SymbolTable syms;
+    DiagnosticSink sink(stderr);
+    Lexer lex(src, syms.intern("<r11d>"), &syms);
+    std::vector<Token> toks;
+    if (!lex.tokenize(toks)) return 1;
+    Parser parser(std::move(toks), &syms, &sink);
+    auto mod = parser.parse_module();
+    if (!mod.has_value()) return 1;
+    Graph g(&syms);
+    Lowerer lw(g, &syms);
+    if (!lw.lower_module(*mod.value()).has_value()) return 1;
+    // Both callees must be present with DISTINCT symbols.
+    SymbolId g_sym = kInvalidSymbolId, h_sym = kInvalidSymbolId;
+    int calls = 0;
+    for (NodeId id = 0; id < g.size(); ++id) {
+        if (g[id].kind != NodeKind::CallAltered) continue;
+        ++calls;
+        if (g_sym == kInvalidSymbolId) g_sym = g[id].payload.sym;
+        else h_sym = g[id].payload.sym;
+    }
+    assert(calls == 2);
+    assert(g_sym != h_sym);
+    std::string why;
+    assert(g.verify(why));
+    return 0;
+}
+
 int r3_minimal_assignment_takes_effect() {
     // Pre-fix: `t = t * 2` was silently dropped; the program returned
     // 1 instead of 2 with no diagnostic.
@@ -1050,6 +1162,11 @@ int main() {
     r10_boundary_single_edge_swap_unchanged();
     r10_integration_duplicate_operands_through_pipeline();
     r10_deopt_use_def_stays_exact_under_dup_edges();
-    std::cout << "regression tests passed (40 assertions OK)\n";
+    r11_minimal_intern_across_reallocation_finds_original();
+    r11_variant_views_stable_after_growth();
+    r11_boundary_duplicate_intern_after_reallocation();
+    r11_integration_compile_many_symbol_module();
+    r11_deopt_symbol_identity_preserved_through_pipeline();
+    std::cout << "regression tests passed (45 assertions OK)\n";
     return 0;
 }
